@@ -21,6 +21,35 @@ async function readResponse(response) {
   return { detail: await response.text() };
 }
 
+export function errorMessage(value, fallback = "Request failed") {
+  if (!value) return fallback;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const lines = value.map((item) => errorMessage(item, "")).filter(Boolean);
+    return lines.length ? lines.join("\n") : fallback;
+  }
+  if (typeof value === "object") {
+    if (typeof value.detail === "string") return value.detail;
+    if (value.detail) return errorMessage(value.detail, fallback);
+    if (typeof value.message === "string") return value.message;
+    if (typeof value.msg === "string") {
+      const loc = Array.isArray(value.loc) ? `${value.loc.join(".")}: ` : "";
+      return `${loc}${value.msg}`;
+    }
+    if (value.error) return errorMessage(value.error, fallback);
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function throwResponseError(payload, statusText) {
+  throw new Error(errorMessage(payload?.detail ?? payload, statusText));
+}
+
 async function postForm(endpoint, extra = {}) {
   const form = new FormData();
   form.append("init_data", getInitData());
@@ -30,14 +59,14 @@ async function postForm(endpoint, extra = {}) {
 
   const response = await fetch(`${API_BASE}${endpoint}`, { method: "POST", body: form });
   const payload = await readResponse(response);
-  if (!response.ok) throw new Error(payload.detail || response.statusText);
+  if (!response.ok) throwResponseError(payload, response.statusText);
   return payload;
 }
 
 export async function fetchConfig() {
   const response = await fetch(`${API_BASE}/api/config`);
   const payload = await readResponse(response);
-  if (!response.ok) throw new Error(payload.detail || response.statusText);
+  if (!response.ok) throwResponseError(payload, response.statusText);
   return payload;
 }
 
@@ -74,7 +103,7 @@ export async function submitGeneration({
 
   const response = await fetch(`${API_BASE}/api/generate`, { method: "POST", body: form });
   const payload = await readResponse(response);
-  if (!response.ok) throw new Error(payload.detail || response.statusText);
+  if (!response.ok) throwResponseError(payload, response.statusText);
   return payload;
 }
 

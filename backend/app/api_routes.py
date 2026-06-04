@@ -7,6 +7,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -20,6 +21,7 @@ from app.database import db
 from app.websocket import manager
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def validate_telegram_init_data(init_data: str) -> Dict:
@@ -347,9 +349,11 @@ async def run_generation(
             result_url=result_url,
         )
     except AIGateError as exc:
+        logger.warning("AIGate generation %s failed: %s", generation_id, exc, exc_info=True)
         await db.update_generation_status(generation_id, "failed", error_message=str(exc))
         await manager.send_progress(telegram_id, generation_id, "failed", str(exc), progress=100)
     except Exception as exc:
+        logger.exception("Generation %s failed unexpectedly", generation_id)
         await db.update_generation_status(generation_id, "failed", error_message=str(exc))
         await manager.send_progress(telegram_id, generation_id, "failed", str(exc), progress=100)
 

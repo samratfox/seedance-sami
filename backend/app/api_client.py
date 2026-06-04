@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +12,25 @@ import aiohttp
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def stringify_error(value: Any) -> str:
+    if value is None:
+        return "AIGate request failed"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [stringify_error(item) for item in value]
+        return "; ".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in ("message", "detail", "msg", "type", "error"):
+            if value.get(key):
+                return stringify_error(value[key])
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except TypeError:
+            return str(value)
+    return str(value)
 
 
 @dataclass
@@ -57,10 +77,10 @@ class AIGateClient:
                 if resp.status >= 400:
                     err = data.get("error") if isinstance(data, dict) else None
                     if isinstance(err, dict):
-                        message = err.get("message") or err.get("type") or "AIGate request failed"
+                        message = stringify_error(err.get("message") or err.get("type") or err)
                         code = err.get("code")
                     else:
-                        message = str(err or data or "AIGate request failed")
+                        message = stringify_error(err or data or "AIGate request failed")
                         code = None
                     raise AIGateError(message=message, status_code=resp.status, code=code, payload=data)
 

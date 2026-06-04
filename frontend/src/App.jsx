@@ -3,6 +3,7 @@ import {
 
   absoluteUrl,
   connectWebSocket,
+  errorMessage,
   fetchBalance,
   fetchConfig,
   fetchHistory,
@@ -344,9 +345,9 @@ export default function App() {
       setHasKey(Boolean(payload.has_key));
       setBalance(payload.balance || "");
       setBalanceRaw(payload.raw || null);
-      if (payload.error) setError(payload.error);
+      if (payload.error) setError(errorMessage(payload.error));
     } catch (caught) {
-      setError(caught.message);
+      setError(errorMessage(caught));
     } finally {
       setBooting(false);
       setCheckingBalance(false);
@@ -370,7 +371,7 @@ export default function App() {
       setGeneration((current) => ({
         id: message.generation_id,
         status: message.status,
-        message: message.message,
+        message: errorMessage(message.message, "Ошибка генерации"),
         progress: message.progress || current?.progress || 0,
         resultUrl: absoluteUrl(message.result_url),
       }));
@@ -444,8 +445,9 @@ export default function App() {
       setNotice("Генерация запущена.");
     } catch (caught) {
       setSubmitting(false);
-      setGeneration((current) => ({ ...current, status: "failed", message: caught.message, progress: 100 }));
-      setError(caught.message);
+      const message = errorMessage(caught);
+      setGeneration((current) => ({ ...current, status: "failed", message, progress: 100 }));
+      setError(message);
     }
   }
 
@@ -460,7 +462,7 @@ export default function App() {
       setPage("generate");
       await loadHistory();
     } catch (caught) {
-      setError(caught.message);
+      setError(errorMessage(caught));
     }
   }
 
