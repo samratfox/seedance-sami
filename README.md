@@ -38,8 +38,6 @@
 ```env
 FAST_MODEL_ID=bytedance/seedance-2.0-fast
 STANDARD_MODEL_ID=bytedance/seedance-2.0
-FAST_REFERENCE_MODEL_ID=bytedance/seedance-2.0/fast/reference-to-video
-STANDARD_REFERENCE_MODEL_ID=bytedance/seedance-2.0/reference-to-video
 ```
 
 Списание денег всё равно выполняет AIGate по API-ключу пользователя. Цены в UI считаются по разрешению и секундам:
@@ -129,8 +127,6 @@ REFERRAL_URL=https://aigate.shop/?ref=your_ref
 CORS_ORIGINS=https://your-frontend.vercel.app
 FAST_MODEL_ID=bytedance/seedance-2.0-fast
 STANDARD_MODEL_ID=bytedance/seedance-2.0
-FAST_REFERENCE_MODEL_ID=bytedance/seedance-2.0/fast/reference-to-video
-STANDARD_REFERENCE_MODEL_ID=bytedance/seedance-2.0/reference-to-video
 ```
 
 ## Frontend: локальный запуск

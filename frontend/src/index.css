@@ -253,6 +253,18 @@ a {
   background: #19302d;
 }
 
+.mode-card:disabled,
+.mode-card.disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+.mode-card:disabled.active,
+.mode-card.disabled.active {
+  border-color: var(--line);
+  background: var(--panel-2);
+}
+
 .mode-card span,
 .mode-card small,
 .cost-line {

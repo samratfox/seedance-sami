@@ -144,23 +144,22 @@ class AIGateClient:
             "seed": seed,
         }
 
-        use_urls = bool(image_urls or video_url or audio_url)
-        payload = (
-            self._video_url_payload(
-                **common,
-                image_urls=image_urls or [],
-                video_url=video_url,
-                audio_url=audio_url,
-                include_extra_refs=True,
-            )
-            if use_urls
-            else self._video_b64_payload(
-                **common,
-                images_b64=images_b64 or [],
-                video_b64=video_b64,
-                audio_b64=audio_b64,
-                include_extra_refs=True,
-            )
+        missing_uploaded_ref_url = bool(
+            (images_b64 and not image_urls)
+            or (video_b64 and not video_url)
+            or (audio_b64 and not audio_url)
+        )
+        use_urls = bool(image_urls or video_url or audio_url) and not missing_uploaded_ref_url
+        payload = self._build_video_payload(
+            use_urls=use_urls,
+            common=common,
+            image_urls=image_urls or [],
+            images_b64=images_b64 or [],
+            video_url=video_url,
+            video_b64=video_b64,
+            audio_url=audio_url,
+            audio_b64=audio_b64,
+            include_extra_refs=True,
         )
 
         logger.info(
@@ -176,11 +175,73 @@ class AIGateClient:
             sorted(payload.keys()),
             prompt[:240].replace("\n", " "),
         )
-        return await self._request("POST", "/video/generations", timeout=900, json=payload)
+        try:
+            return await self._request("POST", "/video/generations", timeout=900, json=payload)
+        except AIGateError as exc:
+            if not self._should_retry_with_primary_reference_only(exc, payload, audio_url or audio_b64):
+                raise
 
-    @staticmethod
-    def _is_reference_model(model: str) -> bool:
-        return "reference-to-video" in model
+            fallback_payload = self._build_video_payload(
+                use_urls=use_urls,
+                common=common,
+                image_urls=image_urls or [],
+                images_b64=images_b64 or [],
+                video_url=video_url,
+                video_b64=video_b64,
+                audio_url=audio_url,
+                audio_b64=audio_b64,
+                include_extra_refs=False,
+            )
+            logger.warning(
+                "AIGate rejected extra reference fields, retrying with official primary reference only: "
+                "model=%s status=%s code=%s payload_keys=%s fallback_keys=%s",
+                model,
+                exc.status_code,
+                exc.code,
+                sorted(payload.keys()),
+                sorted(fallback_payload.keys()),
+            )
+            return await self._request("POST", "/video/generations", timeout=900, json=fallback_payload)
+
+    def _build_video_payload(
+        self,
+        *,
+        use_urls: bool,
+        common: Dict[str, Any],
+        image_urls: List[str],
+        images_b64: List[str],
+        video_url: Optional[str],
+        video_b64: Optional[str],
+        audio_url: Optional[str],
+        audio_b64: Optional[str],
+        include_extra_refs: bool,
+    ) -> Dict[str, Any]:
+        if use_urls:
+            return self._video_url_payload(
+                **common,
+                image_urls=image_urls,
+                video_url=video_url,
+                audio_url=audio_url,
+                include_extra_refs=include_extra_refs,
+            )
+        return self._video_b64_payload(
+            **common,
+            images_b64=images_b64,
+            video_b64=video_b64,
+            audio_b64=audio_b64,
+            include_extra_refs=include_extra_refs,
+        )
+
+    def _should_retry_with_primary_reference_only(
+        self,
+        exc: AIGateError,
+        payload: Dict[str, Any],
+        has_audio_reference: bool,
+    ) -> bool:
+        if exc.status_code != 400 or has_audio_reference:
+            return False
+        provider_options = payload.get("provider_options") or {}
+        return bool(provider_options.get("input_images") or provider_options.get("reference_images"))
 
     def _base_payload(
         self,
@@ -244,27 +305,17 @@ class AIGateClient:
             seed=seed,
         )
 
-        if self._is_reference_model(model):
-            payload.pop("audio", None)
-            payload["generate_audio"] = audio
-            if image_urls:
-                payload["image_urls"] = image_urls[:9]
-            if video_url:
-                payload["video_urls"] = [video_url]
-            if audio_url and include_extra_refs:
-                payload["audio_urls"] = [audio_url]
-            return payload
-
         if image_urls:
-            payload["image_files"] = image_urls[:6]
+            payload["input_image"] = image_urls[0]
             if include_extra_refs and len(image_urls) > 1:
                 payload.setdefault("provider_options", {})["input_images"] = image_urls[1:6]
+                payload.setdefault("provider_options", {})["reference_images"] = image_urls[1:6]
 
         if video_url:
-            payload["video_url"] = video_url
+            payload["input_video"] = video_url
 
         if audio_url and include_extra_refs:
-            payload["audio_url"] = audio_url
+            payload["input_audio"] = audio_url
             payload.setdefault("provider_options", {})["audio_reference"] = audio_url
 
         return payload
@@ -297,9 +348,6 @@ class AIGateClient:
             negative_prompt=negative_prompt,
             seed=seed,
         )
-
-        if self._is_reference_model(model):
-            raise AIGateError("Reference generation requires public Cloudinary URLs")
 
         if images_b64:
             payload["input_image_b64"] = images_b64[0]

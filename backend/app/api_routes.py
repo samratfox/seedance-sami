@@ -214,6 +214,7 @@ async def read_uploads(
                 "b64": base64.b64encode(content).decode("utf-8"),
             }
         )
+        await file.seek(0)
 
     return uploads
 
@@ -438,9 +439,10 @@ async def api_config():
     }
 
 
-def estimate_cost(model_mode: str, resolution: str, duration: int) -> float:
+def estimate_cost(model_mode: str, resolution: str, duration: int, *, with_references: bool = False) -> float:
     mode = settings.model_modes[model_mode]
-    pricing = mode.get("pricing") or {}
+    pricing = mode.get("reference_pricing") if with_references else mode.get("pricing")
+    pricing = pricing or {}
     return round(float(pricing.get(resolution, 0)) * duration, 6)
 
 
@@ -521,9 +523,9 @@ async def api_generate(request: Request):
     video_uploads = await read_uploads([video_file] if video_file else None, limit=1, expected_prefix="video/", label="video reference")
     audio_uploads = await read_uploads([audio_file] if audio_file else None, limit=1, expected_prefix="audio/", label="audio reference")
 
-    image_urls = await upload_refs_to_cloudinary(image_uploads, resource_type="image", prefix="image")
-    video_urls = await upload_refs_to_cloudinary(video_uploads, resource_type="video", prefix="video")
-    audio_urls = await upload_refs_to_cloudinary(audio_uploads, resource_type="video", prefix="audio")
+    image_urls = await try_upload_refs_to_cloudinary(image_uploads, resource_type="image", prefix="image")
+    video_urls = await try_upload_refs_to_cloudinary(video_uploads, resource_type="video", prefix="video")
+    audio_urls = await try_upload_refs_to_cloudinary(audio_uploads, resource_type="video", prefix="audio")
 
     images_b64 = [item["b64"] for item in image_uploads] or images_b64
     video_b64 = video_uploads[0]["b64"] if video_uploads else video_b64
@@ -531,30 +533,32 @@ async def api_generate(request: Request):
     video_url = video_urls[0] if video_urls else None
     audio_url = audio_urls[0] if audio_urls else None
     refs_count = len(images_b64) + (1 if video_b64 else 0) + (1 if audio_b64 else 0)
-    prompt = normalize_reference_tags(prompt, len(image_urls), bool(video_url), bool(audio_url))
+    prompt = normalize_reference_tags(
+        prompt,
+        max(len(image_urls), len(images_b64)),
+        bool(video_url or video_b64),
+        bool(audio_url or audio_b64),
+    )
 
     if refs_count:
-        if not image_urls and not video_url:
+        if not (image_urls or images_b64 or video_url or video_b64):
             raise HTTPException(
                 status_code=400,
                 detail="Для референсной генерации нужен хотя бы фото- или видео-референс.",
             )
 
-        reference_model = str(mode.get("reference_id") or "").strip()
-        if not reference_model:
-            raise HTTPException(status_code=500, detail=f"Reference model id for {model_mode} is not configured")
-
         logger.info(
-            "Using reference-to-video model for generation: selected_mode=%s base_model=%s reference_model=%s "
-            "image_urls=%s video_url=%s audio_url=%s",
+            "Using catalog model with references: selected_mode=%s model=%s image_urls=%s image_b64=%s "
+            "video_url=%s video_b64=%s audio_url=%s audio_b64=%s",
             model_mode,
             model,
-            reference_model,
             len(image_urls),
+            len(images_b64),
             bool(video_url),
+            bool(video_b64),
             bool(audio_url),
+            bool(audio_b64),
         )
-        model = reference_model
 
     generation_id = await db.create_generation(
         user_db_id=user["id"],
@@ -600,7 +604,7 @@ async def api_generate(request: Request):
         "status": "started",
         "model_mode": model_mode,
         "model": model,
-        "estimated_cost": estimate_cost(model_mode, resolution, duration),
+        "estimated_cost": estimate_cost(model_mode, resolution, duration, with_references=bool(refs_count)),
     }
 
 

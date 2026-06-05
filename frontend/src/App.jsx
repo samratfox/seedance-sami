@@ -23,6 +23,8 @@ const DEFAULT_CONFIG = {
   model_modes: {
     fast: {
       id: "bytedance/seedance-2.0-fast",
+      reference_id: "bytedance/seedance-2.0-fast",
+      supports_references: true,
       label: "Fast",
       description: "Быстрее и дешевле, удобно для потока.",
       pricing: {
@@ -33,9 +35,16 @@ const DEFAULT_CONFIG = {
     },
     standard: {
       id: "bytedance/seedance-2.0",
+      reference_id: "bytedance/seedance-2.0",
+      supports_references: true,
       label: "Standard",
       description: "Выше качество, обычно дороже и дольше.",
       pricing: {
+        "480p": 0.020178,
+        "720p": 0.04536,
+        "1080p": 0.10206,
+      },
+      reference_pricing: {
         "480p": 0.020178,
         "720p": 0.04536,
         "1080p": 0.10206,
@@ -311,12 +320,16 @@ export default function App() {
   const [now, setNow] = useState(Date.now());
   const [submitting, setSubmitting] = useState(false);
 
+  const hasReferences = imageFiles.length > 0 || Boolean(videoFile) || Boolean(audioFile);
   const activeMode = config.model_modes?.[modelMode] || DEFAULT_CONFIG.model_modes.fast;
+  const activeModelId = hasReferences && activeMode?.reference_id ? activeMode.reference_id : activeMode?.id;
+  const activePricing = hasReferences && activeMode?.reference_pricing ? activeMode.reference_pricing : activeMode?.pricing;
+  const modeUnavailable = hasReferences && !activeMode?.supports_references;
   const estimatedCost = useMemo(() => {
-    const perSecond = Number(activeMode?.pricing?.[resolution] || 0);
+    const perSecond = Number(activePricing?.[resolution] || 0);
     if (!perSecond) return null;
     return duration * perSecond;
-  }, [activeMode, duration, resolution]);
+  }, [activePricing, duration, resolution]);
 
   const shownProgress = useMemo(() => {
     if (!generation) return 0;
@@ -391,6 +404,16 @@ export default function App() {
   }, [generation?.status, submitting]);
 
   useEffect(() => {
+    if (!hasReferences) return;
+    if (config.model_modes?.[modelMode]?.supports_references) return;
+
+    const referenceMode = config.qualities.find((key) => config.model_modes?.[key]?.supports_references);
+    if (referenceMode && referenceMode !== modelMode) {
+      setModelMode(referenceMode);
+    }
+  }, [config, hasReferences, modelMode]);
+
+  useEffect(() => {
     const next = imageFiles.map((file) => ({ url: URL.createObjectURL(file), name: file.name }));
     setImagePreviews(next);
     return () => next.forEach((item) => URL.revokeObjectURL(item.url));
@@ -435,6 +458,7 @@ export default function App() {
     }
     if (!hasKey) { setPage("profile"); setError("Сначала подключите API-ключ AIGate."); return; }
     if (!prompt.trim()) { setError("Введите промпт для видео."); return; }
+    if (modeUnavailable) { setError("Выбранный режим недоступен с референсами. Выберите другой режим или уберите референсы."); return; }
     setSubmitting(true);
     setGenerationStartedAt(Date.now());
     setNow(Date.now());
@@ -515,7 +539,7 @@ export default function App() {
               </div>
             )}
             <div className="stage-overlay">
-              <span>{activeMode.label}: {activeMode.id}</span>
+              <span>{activeMode.label}: {activeModelId}</span>
               <span>{duration} c / {resolution} / {ratio}</span>
             </div>
           </section>
@@ -524,22 +548,30 @@ export default function App() {
           <section className="panel">
             <div className="section-title">
               <span>Режим качества</span>
-              <small>{money(activeMode.pricing?.[resolution])}</small>
+              <small>{money(activePricing?.[resolution])}</small>
             </div>
             <div className="mode-grid">
               {config.qualities.map((modeKey) => {
                 const item = config.model_modes?.[modeKey] || DEFAULT_CONFIG.model_modes[modeKey];
+                const disabledByRefs = hasReferences && !item?.supports_references;
+                const shownModelId = hasReferences && item?.reference_id ? item.reference_id : item?.id;
                 return (
-                  <button key={modeKey} type="button" className={`mode-card ${modelMode === modeKey ? "active" : ""}`} onClick={() => setModelMode(modeKey)}>
+                  <button
+                    key={modeKey}
+                    type="button"
+                    disabled={disabledByRefs}
+                    className={`mode-card ${modelMode === modeKey ? "active" : ""} ${disabledByRefs ? "disabled" : ""}`}
+                    onClick={() => !disabledByRefs && setModelMode(modeKey)}
+                  >
                     <strong>{item?.label || modeKey}</strong>
                     <span>{item?.description || ""}</span>
-                    <small>{item?.id || ""}</small>
+                    <small>{disabledByRefs ? "Недоступен с референсами" : shownModelId || ""}</small>
                   </button>
                 );
               })}
             </div>
             <div className="cost-line">
-              Расчёт: {estimatedCost ? `$${estimatedCost.toFixed(4)} ориентировочно` : "точное списание покажет AIGate"}
+              Расчёт: {estimatedCost ? `${activeMode.label} / ${duration} c / ${resolution} = $${estimatedCost.toFixed(4)} ориентировочно` : "точное списание покажет AIGate"}
             </div>
           </section>
 
@@ -717,7 +749,7 @@ export default function App() {
               <span>{imageFiles.length} фото, {videoFile ? "1 видео" : "без видео"}, {audioFile ? "1 аудио" : "без аудио"}</span>
               <span>{estimatedCost ? `Ориентир: $${estimatedCost.toFixed(4)}` : "Списание будет по AIGate"}</span>
             </div>
-            <button className="primary-action" type="button" onClick={handleGenerate} disabled={submitting || booting}>
+            <button className="primary-action" type="button" onClick={handleGenerate} disabled={submitting || booting || modeUnavailable}>
               {submitting ? "Генерация идёт" : "Запустить видео"}
             </button>
           </section>

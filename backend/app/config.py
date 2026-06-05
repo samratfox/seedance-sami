@@ -38,14 +38,15 @@ class Settings(BaseSettings):
     SUPPORTED_RESOLUTIONS: Any = Field(default_factory=lambda: ["480p", "720p", "1080p"])
     FAST_MODEL_ID: str = "bytedance/seedance-2.0-fast"
     STANDARD_MODEL_ID: str = "bytedance/seedance-2.0"
-    FAST_REFERENCE_MODEL_ID: str = "bytedance/seedance-2.0/fast/reference-to-video"
-    STANDARD_REFERENCE_MODEL_ID: str = "bytedance/seedance-2.0/reference-to-video"
     FAST_PRICE_480P: float = 0.01614
     FAST_PRICE_720P: float = 0.0363
     FAST_PRICE_1080P: float = 0.08166
     STANDARD_PRICE_480P: float = 0.020178
     STANDARD_PRICE_720P: float = 0.04536
     STANDARD_PRICE_1080P: float = 0.10206
+    STANDARD_REFERENCE_PRICE_480P: float = 0.020178
+    STANDARD_REFERENCE_PRICE_720P: float = 0.04536
+    STANDARD_REFERENCE_PRICE_1080P: float = 0.10206
 
     SUPPORTED_DURATIONS: Any = Field(default_factory=lambda: list(range(4, 16)))
     SUPPORTED_QUALITIES: Any = Field(default_factory=lambda: ["fast", "standard"])
@@ -96,7 +97,8 @@ class Settings(BaseSettings):
         return {
             "fast": {
                 "id": self.FAST_MODEL_ID,
-                "reference_id": self.FAST_REFERENCE_MODEL_ID,
+                "reference_id": self.FAST_MODEL_ID,
+                "supports_references": True,
                 "label": "Fast",
                 "description": "Быстрее и дешевле, подходит для потока.",
                 "pricing": {
@@ -107,13 +109,19 @@ class Settings(BaseSettings):
             },
             "standard": {
                 "id": self.STANDARD_MODEL_ID,
-                "reference_id": self.STANDARD_REFERENCE_MODEL_ID,
+                "reference_id": self.STANDARD_MODEL_ID,
+                "supports_references": True,
                 "label": "Standard",
                 "description": "Качественнее, обычно дороже и дольше.",
                 "pricing": {
                     "480p": self.STANDARD_PRICE_480P,
                     "720p": self.STANDARD_PRICE_720P,
                     "1080p": self.STANDARD_PRICE_1080P,
+                },
+                "reference_pricing": {
+                    "480p": self.STANDARD_REFERENCE_PRICE_480P,
+                    "720p": self.STANDARD_REFERENCE_PRICE_720P,
+                    "1080p": self.STANDARD_REFERENCE_PRICE_1080P,
                 },
             },
         }
