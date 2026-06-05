@@ -117,13 +117,14 @@ def form_files(form, key: str) -> List[UploadFile]:
     return [item for item in items if getattr(item, "filename", None)]
 
 
-async def upload_to_0x0st(
+async def files_to_data_uri(
     files: Optional[List[UploadFile]],
     *,
     limit: int,
     expected_prefix: str,
     label: str,
 ) -> List[str]:
+    """Convert uploaded files to data URI (base64) — no external hosting needed."""
     urls: List[str] = []
     max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
 
@@ -137,41 +138,68 @@ async def upload_to_0x0st(
         if len(content) > max_bytes:
             raise HTTPException(status_code=400, detail=f"{label} больше {settings.MAX_UPLOAD_MB} MB")
 
-        timeout = aiohttp.ClientTimeout(total=30)
-        data = aiohttp.FormData()
-        data.add_field(
-            "file",
-            content,
-            filename=file.filename,
-            content_type=file.content_type or expected_prefix,
-        )
-
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post("https://0x0.st", data=data) as resp:
-                text = await resp.text()
-                if resp.status >= 400:
-                    raise HTTPException(status_code=500, detail=f"0x0.st upload failed: {text}")
-                url = text.strip()
-                if not url.startswith("http"):
-                    raise HTTPException(status_code=500, detail=f"0x0.st upload failed: {url}")
-                urls.append(url)
+        b64 = base64.b64encode(content).decode("utf-8")
+        mime = file.content_type or expected_prefix
+        data_uri = f"data:{mime};base64,{b64}"
+        urls.append(data_uri)
 
     return urls
 
 
-async def upload_one_to_0x0st(
+async def one_file_to_data_uri(
     file: Optional[UploadFile],
     *,
     expected_prefix: str,
     label: str,
 ) -> Optional[str]:
-    values = await upload_to_0x0st(
+    values = await files_to_data_uri(
         [file] if file else None,
         limit=1,
         expected_prefix=expected_prefix,
         label=label,
     )
     return values[0] if values else None
+
+
+async def upload_to_fileio(
+    file: Optional[UploadFile],
+    *,
+    expected_prefix: str,
+    label: str,
+) -> Optional[str]:
+    """Upload video/audio to file.io (1 download, then link expires)."""
+    if not file or not file.filename:
+        return None
+    if file.content_type and not file.content_type.startswith(expected_prefix):
+        raise HTTPException(status_code=400, detail=f"Неверный тип файла: {label}")
+
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    content = await file.read()
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=400, detail=f"{label} больше {settings.MAX_UPLOAD_MB} MB")
+
+    timeout = aiohttp.ClientTimeout(total=60)
+    data = aiohttp.FormData()
+    data.add_field(
+        "file",
+        content,
+        filename=file.filename,
+        content_type=file.content_type or expected_prefix,
+    )
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post("https://file.io", data=data) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                raise HTTPException(status_code=500, detail=f"file.io upload failed: {text}")
+            try:
+                result = json.loads(text)
+                url = result.get("link", "").strip()
+            except json.JSONDecodeError:
+                url = text.strip()
+            if not url.startswith("http"):
+                raise HTTPException(status_code=500, detail=f"file.io upload failed: {url}")
+            return url
 
 
 def local_video_path(generation_id: int) -> Path:
@@ -378,18 +406,20 @@ async def api_generate(request: Request):
     if not model:
         raise HTTPException(status_code=500, detail=f"Model id for {model_mode} is not configured")
 
-    image_urls = await upload_to_0x0st(
+    # Images: data URI (base64) — works for any number of photos
+    image_urls = await files_to_data_uri(
         image_files,
         limit=settings.MAX_IMAGE_REFERENCES,
         expected_prefix="image/",
         label="Фото-референс",
     )
-    video_url = await upload_one_to_0x0st(
+    # Video & Audio: file.io (too large for base64 in JSON)
+    video_url = await upload_to_fileio(
         video_file,
         expected_prefix="video/",
         label="Видео-референс",
     )
-    audio_url = await upload_one_to_0x0st(
+    audio_url = await upload_to_fileio(
         audio_file,
         expected_prefix="audio/",
         label="Аудио-референс",
