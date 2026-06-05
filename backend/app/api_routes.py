@@ -37,8 +37,7 @@ def validate_telegram_init_data(init_data: str) -> Dict:
     if not received_hash:
         raise HTTPException(status_code=403, detail="Telegram auth hash is missing")
 
-    data_check_string = "
-".join(f"{key}={value}" for key, value in sorted(parsed.items()))
+    data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(parsed.items()))
     secret_key = hmac.new(b"WebAppData", settings.BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
     calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -251,23 +250,13 @@ async def notify_generation_completed(
 ) -> None:
     result_url = public_url(result_url)
     text = (
-        "Видео готово
-
-"
-        f"Задача: #{generation_id}
-"
-        f"Режим: {quality} ({model})
-"
-        f"Параметры: {duration} c / {resolution} / {ratio}
-"
-        f"Звук: {'да' if audio else 'нет'}
-"
-        f"Референсы: {refs_count}
-
-"
-        f"Промпт: {prompt_preview(prompt)}
-
-"
+        "Видео готово\n\n"
+        f"Задача: #{generation_id}\n"
+        f"Режим: {quality} ({model})\n"
+        f"Параметры: {duration} c / {resolution} / {ratio}\n"
+        f"Звук: {'да' if audio else 'нет'}\n"
+        f"Референсы: {refs_count}\n\n"
+        f"Промпт: {prompt_preview(prompt)}\n\n"
         f"Ссылка: {result_url}"
     )
     await send_telegram_message(telegram_id, text, result_url=result_url)
@@ -288,23 +277,13 @@ async def notify_generation_failed(
     error: str,
 ) -> None:
     text = (
-        "Генерация не удалась
-
-"
-        f"Задача: #{generation_id}
-"
-        f"Режим: {quality} ({model})
-"
-        f"Параметры: {duration} c / {resolution} / {ratio}
-"
-        f"Звук: {'да' if audio else 'нет'}
-"
-        f"Референсы: {refs_count}
-
-"
-        f"Ошибка: {error}
-
-"
+        "Генерация не удалась\n\n"
+        f"Задача: #{generation_id}\n"
+        f"Режим: {quality} ({model})\n"
+        f"Параметры: {duration} c / {resolution} / {ratio}\n"
+        f"Звук: {'да' if audio else 'нет'}\n"
+        f"Референсы: {refs_count}\n\n"
+        f"Ошибка: {error}\n\n"
         f"Промпт: {prompt_preview(prompt)}"
     )
     await send_telegram_message(telegram_id, text)
