@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 from urllib.parse import parse_qsl
 
 import aiohttp
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 
 from app.api_client import AIGateClient, AIGateError, extract_video_url, format_balance
 from app.config import settings
@@ -80,6 +80,41 @@ async def get_or_create_user(init_data: str) -> Dict:
 def ensure_supported(value, allowed, label: str):
     if value not in allowed:
         raise HTTPException(status_code=400, detail=f"Unsupported {label}: {value}")
+
+
+def form_text(form, key: str, default: str = "") -> str:
+    value = form.get(key)
+    if value is None:
+        return default
+    return str(value)
+
+
+def form_int(form, key: str, default: int) -> int:
+    value = form_text(form, key, str(default)).strip()
+    try:
+        return int(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {key}: {value}") from None
+
+
+def form_optional_int(form, key: str) -> Optional[int]:
+    value = form_text(form, key).strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {key}: {value}") from None
+
+
+def form_bool(form, key: str, default: bool = False) -> bool:
+    value = form_text(form, key, "true" if default else "false").strip().lower()
+    return value in {"1", "true", "yes", "on", "да"}
+
+
+def form_files(form, key: str) -> List[UploadFile]:
+    items = form.getlist(key)
+    return [item for item in items if getattr(item, "filename", None)]
 
 
 async def upload_to_b64(
@@ -285,20 +320,21 @@ async def api_models(init_data: str = Form(...)):
 
 
 @router.post("/api/generate")
-async def api_generate(
-    init_data: str = Form(...),
-    model_mode: str = Form("fast"),
-    prompt: str = Form(...),
-    duration: int = Form(5),
-    resolution: str = Form("720p"),
-    ratio: str = Form("16:9"),
-    audio: bool = Form(False),
-    negative_prompt: str = Form(""),
-    seed: Optional[int] = Form(None),
-    image_files: Optional[List[UploadFile]] = File(default=None),
-    video_file: Optional[UploadFile] = File(default=None),
-    audio_file: Optional[UploadFile] = File(default=None),
-):
+async def api_generate(request: Request):
+    form = await request.form()
+    init_data = form_text(form, "init_data")
+    model_mode = form_text(form, "model_mode", "fast")
+    prompt = form_text(form, "prompt")
+    duration = form_int(form, "duration", 5)
+    resolution = form_text(form, "resolution", "720p")
+    ratio = form_text(form, "ratio", "16:9")
+    audio = form_bool(form, "audio", False)
+    negative_prompt = form_text(form, "negative_prompt")
+    seed = form_optional_int(form, "seed")
+    image_files = form_files(form, "image_files")
+    video_file = next(iter(form_files(form, "video_file")), None)
+    audio_file = next(iter(form_files(form, "audio_file")), None)
+
     user = await get_or_create_user(init_data)
     if not user.get("api_key"):
         raise HTTPException(status_code=400, detail="Сначала подключите API-ключ AIGate")
