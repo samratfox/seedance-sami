@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     PROVIDER_API_BASE: str = "https://api.aigate.shop/v1"
     TELEGRAM_AUTH_MAX_AGE_SECONDS: int = 86400
 
+    # Cloudinary credentials for image/video/audio hosting
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+
     # Local UI preview only. Keep false on a real server.
     ALLOW_DEV_AUTH: bool = False
     DEV_TELEGRAM_ID: int = 100000001
