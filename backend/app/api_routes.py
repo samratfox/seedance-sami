@@ -25,6 +25,12 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+# Cloudinary credentials from environment
+CLOUDINARY_CLOUD_NAME = getattr(settings, 'CLOUDINARY_CLOUD_NAME', '') or ''
+CLOUDINARY_API_KEY = getattr(settings, 'CLOUDINARY_API_KEY', '') or ''
+CLOUDINARY_API_SECRET = getattr(settings, 'CLOUDINARY_API_SECRET', '') or ''
+
+
 def validate_telegram_init_data(init_data: str) -> Dict:
     if settings.ALLOW_DEV_AUTH and (not init_data or init_data == "dev"):
         return {"id": settings.DEV_TELEGRAM_ID, "first_name": "Demo", "username": "demo_user"}
@@ -117,14 +123,18 @@ def form_files(form, key: str) -> List[UploadFile]:
     return [item for item in items if getattr(item, "filename", None)]
 
 
-async def files_to_data_uri(
+async def upload_to_cloudinary(
     files: Optional[List[UploadFile]],
     *,
     limit: int,
     expected_prefix: str,
     label: str,
+    resource_type: str = "image",
 ) -> List[str]:
-    """Convert uploaded files to data URI (base64) — no external hosting needed."""
+    """Upload files to Cloudinary and return direct URLs."""
+    if not CLOUDINARY_CLOUD_NAME or not CLOUDINARY_API_KEY or not CLOUDINARY_API_SECRET:
+        raise HTTPException(status_code=500, detail="Cloudinary credentials not configured")
+
     urls: List[str] = []
     max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
 
@@ -138,68 +148,52 @@ async def files_to_data_uri(
         if len(content) > max_bytes:
             raise HTTPException(status_code=400, detail=f"{label} больше {settings.MAX_UPLOAD_MB} MB")
 
-        b64 = base64.b64encode(content).decode("utf-8")
-        mime = file.content_type or expected_prefix
-        data_uri = f"data:{mime};base64,{b64}"
-        urls.append(data_uri)
+        # Generate signature for Cloudinary
+        timestamp = str(int(time.time()))
+        params = f"timestamp={timestamp}{CLOUDINARY_API_SECRET}"
+        signature = hashlib.sha1(params.encode()).hexdigest()
+
+        upload_url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/{resource_type}/upload"
+
+        timeout = aiohttp.ClientTimeout(total=60)
+        data = aiohttp.FormData()
+        data.add_field("file", content, filename=file.filename, content_type=file.content_type or expected_prefix)
+        data.add_field("api_key", CLOUDINARY_API_KEY)
+        data.add_field("timestamp", timestamp)
+        data.add_field("signature", signature)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(upload_url, data=data) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {text}")
+                try:
+                    result = json.loads(text)
+                    url = result.get("secure_url", "").strip()
+                except json.JSONDecodeError:
+                    url = text.strip()
+                if not url.startswith("http"):
+                    raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {url}")
+                urls.append(url)
 
     return urls
 
 
-async def one_file_to_data_uri(
+async def upload_one_to_cloudinary(
     file: Optional[UploadFile],
     *,
     expected_prefix: str,
     label: str,
+    resource_type: str = "image",
 ) -> Optional[str]:
-    values = await files_to_data_uri(
+    values = await upload_to_cloudinary(
         [file] if file else None,
         limit=1,
         expected_prefix=expected_prefix,
         label=label,
+        resource_type=resource_type,
     )
     return values[0] if values else None
-
-
-async def upload_to_fileio(
-    file: Optional[UploadFile],
-    *,
-    expected_prefix: str,
-    label: str,
-) -> Optional[str]:
-    """Upload video/audio to file.io (1 download, then link expires)."""
-    if not file or not file.filename:
-        return None
-    if file.content_type and not file.content_type.startswith(expected_prefix):
-        raise HTTPException(status_code=400, detail=f"Неверный тип файла: {label}")
-
-    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
-    content = await file.read()
-    if len(content) > max_bytes:
-        raise HTTPException(status_code=400, detail=f"{label} больше {settings.MAX_UPLOAD_MB} MB")
-
-    timeout = aiohttp.ClientTimeout(total=60)
-    data = aiohttp.FormData()
-    data.add_field(
-        "file",
-        content,
-        filename=file.filename,
-        content_type=file.content_type or expected_prefix,
-    )
-
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post("https://file.io", data=data) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                raise HTTPException(status_code=500, detail=f"file.io upload failed: {text}")
-            try:
-                result = json.loads(text)
-                url = result.get("link", "").strip()
-            except json.JSONDecodeError:
-                url = text.strip()
-            if not url.startswith("http"):
-                raise HTTPException(status_code=500, detail=f"file.io upload failed: {url}")
-            return url
 
 
 def local_video_path(generation_id: int) -> Path:
@@ -406,23 +400,25 @@ async def api_generate(request: Request):
     if not model:
         raise HTTPException(status_code=500, detail=f"Model id for {model_mode} is not configured")
 
-    # Images: data URI (base64) — works for any number of photos
-    image_urls = await files_to_data_uri(
+    # Upload all references to Cloudinary
+    image_urls = await upload_to_cloudinary(
         image_files,
         limit=settings.MAX_IMAGE_REFERENCES,
         expected_prefix="image/",
         label="Фото-референс",
+        resource_type="image",
     )
-    # Video & Audio: file.io (too large for base64 in JSON)
-    video_url = await upload_to_fileio(
+    video_url = await upload_one_to_cloudinary(
         video_file,
         expected_prefix="video/",
         label="Видео-референс",
+        resource_type="video",
     )
-    audio_url = await upload_to_fileio(
+    audio_url = await upload_one_to_cloudinary(
         audio_file,
         expected_prefix="audio/",
         label="Аудио-референс",
+        resource_type="video",  # Cloudinary uses "video" for audio too
     )
     refs_count = len(image_urls) + (1 if video_url else 0) + (1 if audio_url else 0)
 
