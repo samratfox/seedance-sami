@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     SUPPORTED_RESOLUTIONS: Any = Field(default_factory=lambda: ["480p", "720p", "1080p"])
     FAST_MODEL_ID: str = "bytedance/seedance-2.0-fast"
     STANDARD_MODEL_ID: str = "bytedance/seedance-2.0"
+    FAST_REFERENCE_MODEL_ID: str = "bytedance/seedance-2.0/fast/reference-to-video"
+    STANDARD_REFERENCE_MODEL_ID: str = "bytedance/seedance-2.0/reference-to-video"
     FAST_PRICE_480P: float = 0.01614
     FAST_PRICE_720P: float = 0.0363
     FAST_PRICE_1080P: float = 0.08166
@@ -94,6 +96,7 @@ class Settings(BaseSettings):
         return {
             "fast": {
                 "id": self.FAST_MODEL_ID,
+                "reference_id": self.FAST_REFERENCE_MODEL_ID,
                 "label": "Fast",
                 "description": "Быстрее и дешевле, подходит для потока.",
                 "pricing": {
@@ -104,6 +107,7 @@ class Settings(BaseSettings):
             },
             "standard": {
                 "id": self.STANDARD_MODEL_ID,
+                "reference_id": self.STANDARD_REFERENCE_MODEL_ID,
                 "label": "Standard",
                 "description": "Качественнее, обычно дороже и дольше.",
                 "pricing": {

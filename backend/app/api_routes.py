@@ -533,6 +533,29 @@ async def api_generate(request: Request):
     refs_count = len(images_b64) + (1 if video_b64 else 0) + (1 if audio_b64 else 0)
     prompt = normalize_reference_tags(prompt, len(image_urls), bool(video_url), bool(audio_url))
 
+    if refs_count:
+        if not image_urls and not video_url:
+            raise HTTPException(
+                status_code=400,
+                detail="Для референсной генерации нужен хотя бы фото- или видео-референс.",
+            )
+
+        reference_model = str(mode.get("reference_id") or "").strip()
+        if not reference_model:
+            raise HTTPException(status_code=500, detail=f"Reference model id for {model_mode} is not configured")
+
+        logger.info(
+            "Using reference-to-video model for generation: selected_mode=%s base_model=%s reference_model=%s "
+            "image_urls=%s video_url=%s audio_url=%s",
+            model_mode,
+            model,
+            reference_model,
+            len(image_urls),
+            bool(video_url),
+            bool(audio_url),
+        )
+        model = reference_model
+
     generation_id = await db.create_generation(
         user_db_id=user["id"],
         model=model,
@@ -660,8 +683,6 @@ async def run_generation(
             )
 
         message = "Готово!"
-        if result.get("_multiref_fallback"):
-            message = "Готово. AIGate не принял экспериментальные референсы, поэтому использовали официальный набор."
 
         await db.update_generation_status(generation_id, "completed", result_url=result_url)
         await manager.send_progress(

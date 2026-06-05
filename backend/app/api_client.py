@@ -163,38 +163,24 @@ class AIGateClient:
             )
         )
 
-        try:
-            return await self._request("POST", "/video/generations", timeout=900, json=payload)
-        except AIGateError as exc:
-            has_experimental_refs = bool(
-                (images_b64 and len(images_b64) > 1)
-                or audio_b64
-                or (image_urls and len(image_urls) > 1)
-                or audio_url
-            )
-            if exc.status_code == 400 and has_experimental_refs:
-                logger.info("AIGate rejected experimental reference payload; retrying with the official inputs only.")
-                fallback_payload = (
-                    self._video_url_payload(
-                        **common,
-                        image_urls=(image_urls or [])[:1],
-                        video_url=video_url,
-                        audio_url=None,
-                        include_extra_refs=False,
-                    )
-                    if use_urls
-                    else self._video_b64_payload(
-                        **common,
-                        images_b64=(images_b64 or [])[:1],
-                        video_b64=video_b64,
-                        audio_b64=None,
-                        include_extra_refs=False,
-                    )
-                )
-                result = await self._request("POST", "/video/generations", timeout=900, json=fallback_payload)
-                result["_multiref_fallback"] = True
-                return result
-            raise
+        logger.info(
+            "Submitting AIGate video generation: model=%s duration=%s resolution=%s ratio=%s "
+            "image_refs=%s video_ref=%s audio_ref=%s payload_keys=%s prompt=%s",
+            model,
+            duration,
+            resolution,
+            aspect_ratio,
+            len(image_urls or images_b64 or []),
+            bool(video_url or video_b64),
+            bool(audio_url or audio_b64),
+            sorted(payload.keys()),
+            prompt[:240].replace("\n", " "),
+        )
+        return await self._request("POST", "/video/generations", timeout=900, json=payload)
+
+    @staticmethod
+    def _is_reference_model(model: str) -> bool:
+        return "reference-to-video" in model
 
     def _base_payload(
         self,
@@ -258,6 +244,17 @@ class AIGateClient:
             seed=seed,
         )
 
+        if self._is_reference_model(model):
+            payload.pop("audio", None)
+            payload["generate_audio"] = audio
+            if image_urls:
+                payload["image_urls"] = image_urls[:9]
+            if video_url:
+                payload["video_urls"] = [video_url]
+            if audio_url and include_extra_refs:
+                payload["audio_urls"] = [audio_url]
+            return payload
+
         if image_urls:
             payload["image_files"] = image_urls[:6]
             if include_extra_refs and len(image_urls) > 1:
@@ -301,6 +298,9 @@ class AIGateClient:
             seed=seed,
         )
 
+        if self._is_reference_model(model):
+            raise AIGateError("Reference generation requires public Cloudinary URLs")
+
         if images_b64:
             payload["input_image_b64"] = images_b64[0]
             if include_extra_refs and len(images_b64) > 1:
@@ -324,6 +324,24 @@ class AIGateClient:
 
 
 def extract_video_url(result: Dict[str, Any]) -> Optional[str]:
+    video = result.get("video")
+    if isinstance(video, dict) and video.get("url"):
+        return video["url"]
+    if isinstance(video, str):
+        return video
+
+    outputs = result.get("outputs") or []
+    if outputs and isinstance(outputs[0], str):
+        return outputs[0]
+    if outputs and isinstance(outputs[0], dict) and outputs[0].get("url"):
+        return outputs[0]["url"]
+
+    data_dict = result.get("data")
+    if isinstance(data_dict, dict):
+        nested = extract_video_url(data_dict)
+        if nested:
+            return nested
+
     videos = result.get("videos") or []
     if videos and isinstance(videos[0], dict) and videos[0].get("url"):
         return videos[0]["url"]
