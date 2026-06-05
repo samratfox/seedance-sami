@@ -238,6 +238,8 @@ class AIGateClient:
         payload: Dict[str, Any],
         has_audio_reference: bool,
     ) -> bool:
+        if settings.STRICT_MULTI_IMAGE_REFERENCES:
+            return False
         if exc.status_code != 400 or has_audio_reference:
             return False
         provider_options = payload.get("provider_options") or {}
@@ -306,16 +308,23 @@ class AIGateClient:
         )
 
         if image_urls:
-            payload["input_image"] = image_urls[0]
-            if include_extra_refs and len(image_urls) > 1:
-                payload.setdefault("provider_options", {})["input_images"] = image_urls[1:6]
-                payload.setdefault("provider_options", {})["reference_images"] = image_urls[1:6]
+            image_refs = image_urls[: settings.MAX_IMAGE_REFERENCES]
+            payload["input_image"] = image_refs[0]
+            if include_extra_refs and len(image_refs) > 1:
+                provider_options = payload.setdefault("provider_options", {})
+                provider_options["input_images"] = image_refs
+                provider_options["reference_images"] = image_refs
+                provider_options["image_references"] = [
+                    {"tag": f"@Image{index}", "url": url}
+                    for index, url in enumerate(image_refs, start=1)
+                ]
 
         if video_url:
             payload["input_video"] = video_url
 
         if audio_url and include_extra_refs:
             payload["input_audio"] = audio_url
+            payload["audio_reference"] = audio_url
             payload.setdefault("provider_options", {})["audio_reference"] = audio_url
 
         return payload
@@ -350,15 +359,25 @@ class AIGateClient:
         )
 
         if images_b64:
-            payload["input_image_b64"] = images_b64[0]
-            if include_extra_refs and len(images_b64) > 1:
-                payload.setdefault("provider_options", {})["input_images"] = images_b64[1:6]
+            image_refs = images_b64[: settings.MAX_IMAGE_REFERENCES]
+            payload["input_image_b64"] = image_refs[0]
+            if include_extra_refs and len(image_refs) > 1:
+                provider_options = payload.setdefault("provider_options", {})
+                provider_options["input_images"] = image_refs
+                provider_options["input_images_b64"] = image_refs
+                provider_options["reference_images"] = image_refs
+                provider_options["reference_images_b64"] = image_refs
+                provider_options["image_references"] = [
+                    {"tag": f"@Image{index}", "index": index}
+                    for index, _ in enumerate(image_refs, start=1)
+                ]
 
         if video_b64:
             payload["input_video_b64"] = video_b64
 
         if audio_b64 and include_extra_refs:
             payload["input_audio_b64"] = audio_b64
+            payload["audio_reference_b64"] = audio_b64
             payload.setdefault("provider_options", {})["audio_reference_b64"] = audio_b64
 
         return payload

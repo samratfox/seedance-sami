@@ -9,14 +9,18 @@ import hmac
 import json
 import logging
 import re
+import shutil
+import tempfile
 import time
 import uuid
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import parse_qsl
 
 import aiohttp
 from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from app.api_client import AIGateClient, AIGateError, extract_video_url, format_balance
 from app.config import settings
@@ -123,19 +127,46 @@ def form_files(form, key: str) -> List[UploadFile]:
     return [item for item in items if getattr(item, "filename", None)]
 
 
-def normalize_reference_tags(prompt: str, image_count: int, has_video: bool, has_audio: bool) -> str:
+def normalize_reference_mentions(prompt: str) -> str:
     prompt = re.sub(
         r"@reference\s*(\d+)(?:\s*\[[^\]]+\])?",
         lambda match: f"@Image{match.group(1)}",
         prompt,
         flags=re.IGNORECASE,
     )
+    prompt = re.sub(r"@img\s*(\d+)", lambda match: f"@Image{match.group(1)}", prompt, flags=re.IGNORECASE)
     prompt = re.sub(r"@image\s*(\d+)", lambda match: f"@Image{match.group(1)}", prompt, flags=re.IGNORECASE)
     prompt = re.sub(r"@video\s+reference(?:\s*\[[^\]]+\])?", "@Video1", prompt, flags=re.IGNORECASE)
     prompt = re.sub(r"@audio\s+reference(?:\s*\[[^\]]+\])?", "@Audio1", prompt, flags=re.IGNORECASE)
     prompt = re.sub(r"(@(?:Image|Video|Audio)\d+)\s*\[[^\]]+\]", r"\1", prompt, flags=re.IGNORECASE)
+    return prompt
+
+
+def normalize_reference_tags(
+    prompt: str,
+    image_count: int,
+    has_video: bool,
+    has_audio: bool,
+    *,
+    image_sheet: bool = False,
+) -> str:
+    prompt = normalize_reference_mentions(prompt)
 
     prefix_parts: List[str] = []
+    if image_sheet:
+        image_tags = ", ".join(f"Image{index}" for index in range(1, image_count + 1))
+        prefix_parts.append(
+            f"The input image is a labeled reference sheet containing {image_tags}; "
+            "treat each panel as a separate visual reference and ignore labels, borders, and file names."
+        )
+    elif image_count:
+        image_map = "; ".join(f"@Image{index}=uploaded image reference {index}" for index in range(1, image_count + 1))
+        prefix_parts.append(
+            f"Reference map: {image_map}. "
+            "Treat each @ImageN as a separate source. Do not merge identities, outfits, objects, or instructions "
+            "between different image references. When the prompt mentions @ImageN, apply only that referenced image "
+            "to that specific character, object, scene beat, or instruction."
+        )
     if image_count and not re.search(r"@Image\d+", prompt, flags=re.IGNORECASE):
         image_tags = ", ".join(f"@Image{index}" for index in range(1, image_count + 1))
         prefix_parts.append(f"Use {image_tags} as visual reference.")
@@ -147,6 +178,131 @@ def normalize_reference_tags(prompt: str, image_count: int, has_video: bool, has
     if prefix_parts:
         prompt = f"{' '.join(prefix_parts)} {prompt}"
     return prompt
+
+
+def rewrite_video_tags_to_audio(prompt: str) -> str:
+    return re.sub(r"@Video\d+", "@Audio1", prompt, flags=re.IGNORECASE)
+
+
+def instruction_image_indexes(prompt: str, image_count: int) -> List[int]:
+    if image_count <= 0:
+        return []
+
+    normalized = normalize_reference_mentions(prompt)
+    patterns = [
+        r"(?:instruction|instructions|prompt|script|text|rules|read|ocr|инструкц\w*|промпт\w*|текст\w*|прочит\w*)"
+        r"(?:\s+from|\s+in|\s+on|\s+из|\s+с|\s+на|\s+по)?[^@]{0,60}@Image(\d+)",
+        r"@Image(\d+)\s*(?:is|as|=|это|как)?\s*"
+        r"(?:instruction|instructions|prompt|script|text|rules|read|ocr|инструкц\w*|промпт\w*|текст\w*|прочит\w*)",
+    ]
+
+    indexes = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, normalized, flags=re.IGNORECASE):
+            index = int(match.group(1))
+            if 1 <= index <= image_count:
+                indexes.add(index)
+
+    return sorted(indexes)
+
+
+def clean_ocr_text(text: str) -> str:
+    text = text.replace("\x0c", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = "\n".join(line.strip() for line in text.splitlines())
+    return text.strip()
+
+
+def ocr_image_upload(upload: Dict[str, str], index: int) -> str:
+    try:
+        import pytesseract
+    except ImportError:
+        logger.warning("pytesseract is not installed; cannot OCR @Image%s", index)
+        return ""
+
+    try:
+        image = Image.open(BytesIO(upload["content"]))
+        image = ImageOps.exif_transpose(image).convert("L")
+        resample = getattr(Image, "Resampling", Image).LANCZOS
+        if image.width < 1600:
+            scale = min(4, max(2, int(1600 / max(image.width, 1))))
+            image = image.resize((image.width * scale, image.height * scale), resample)
+        image = ImageOps.autocontrast(image)
+        text = pytesseract.image_to_string(image, lang=settings.OCR_LANG, config="--psm 6")
+        text = clean_ocr_text(text)
+        if len(text) < settings.OCR_MIN_TEXT_CHARS:
+            logger.info("OCR text from @Image%s is too short to use", index)
+            return ""
+        return text[: settings.OCR_MAX_CHARS_PER_IMAGE]
+    except Exception as exc:
+        logger.warning("Cannot OCR @Image%s: %s", index, exc)
+        return ""
+
+
+async def extract_instruction_texts_from_images(prompt: str, uploads: List[Dict[str, str]]) -> Dict[int, str]:
+    if not settings.ENABLE_IMAGE_OCR:
+        return {}
+
+    indexes = instruction_image_indexes(prompt, len(uploads))
+    if not indexes:
+        return {}
+
+    results = await asyncio.gather(
+        *(asyncio.to_thread(ocr_image_upload, uploads[index - 1], index) for index in indexes),
+        return_exceptions=True,
+    )
+
+    extracted: Dict[int, str] = {}
+    for index, result in zip(indexes, results):
+        if isinstance(result, Exception):
+            logger.warning("OCR task failed for @Image%s: %s", index, result)
+            continue
+        if result:
+            extracted[index] = result
+
+    return extracted
+
+
+def add_ocr_instruction_text(prompt: str, extracted: Dict[int, str]) -> str:
+    if not extracted:
+        return prompt
+
+    header = (
+        "\n\nExtracted OCR instruction text from referenced images. "
+        "Use this text when the prompt says to use instructions/text from that image:\n"
+    )
+    available = settings.MAX_GENERATION_PROMPT_LENGTH - len(prompt) - len(header)
+    if available < 180:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Промпт почти заполнил серверный лимит. Для чтения инструкции с картинки нужно оставить место "
+                "под распознанный текст или уменьшить инструкцию."
+            ),
+        )
+
+    blocks: List[str] = []
+    remaining = available
+    for index, text in sorted(extracted.items()):
+        title = f"@Image{index} OCR text:\n"
+        if remaining <= len(title) + 80:
+            break
+        chunk = text[: remaining - len(title)]
+        blocks.append(f"{title}{chunk}")
+        remaining -= len(title) + len(chunk) + 2
+
+    if not blocks:
+        return prompt
+    joined_blocks = "\n\n".join(blocks)
+    return f"{prompt}{header}{joined_blocks}"
+
+
+def add_negative_constraints_to_prompt(prompt: str, negative_prompt: str) -> str:
+    negative_prompt = (negative_prompt or "").strip()
+    if not negative_prompt:
+        return prompt
+    return f"{prompt}\n\nNegative constraints / avoid: {negative_prompt}"
 
 
 async def upload_to_b64(
@@ -217,6 +373,130 @@ async def read_uploads(
         await file.seek(0)
 
     return uploads
+
+
+def build_image_reference_uploads(uploads: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    if len(uploads) <= 1:
+        return uploads
+
+    sheet = build_image_reference_sheet(uploads[: settings.MAX_IMAGE_REFERENCES])
+    return [sheet]
+
+
+def image_reference_sheet_enabled() -> bool:
+    return settings.MULTI_IMAGE_REFERENCE_MODE.strip().lower() in {"sheet", "reference_sheet", "combined"}
+
+
+def build_image_reference_sheet(uploads: List[Dict[str, str]]) -> Dict[str, str]:
+    count = len(uploads)
+    columns = 2 if count <= 4 else 3
+    rows = (count + columns - 1) // columns
+    tile_w = 640
+    tile_h = 640
+    label_h = 54
+    gap = 18
+    padding = 24
+    sheet_w = padding * 2 + columns * tile_w + (columns - 1) * gap
+    sheet_h = padding * 2 + rows * (tile_h + label_h) + (rows - 1) * gap
+
+    sheet = Image.new("RGB", (sheet_w, sheet_h), "#111111")
+    draw = ImageDraw.Draw(sheet)
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
+    except OSError:
+        font = ImageFont.load_default()
+
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    for index, upload in enumerate(uploads):
+        row = index // columns
+        col = index % columns
+        x = padding + col * (tile_w + gap)
+        y = padding + row * (tile_h + label_h + gap)
+
+        frame = Image.new("RGB", (tile_w, tile_h), "#1b1a17")
+        try:
+            image = Image.open(BytesIO(upload["content"]))
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image.thumbnail((tile_w, tile_h), resample)
+            px = (tile_w - image.width) // 2
+            py = (tile_h - image.height) // 2
+            frame.paste(image, (px, py))
+        except Exception as exc:
+            logger.warning("Cannot add image reference %s to sheet: %s", index + 1, exc)
+
+        sheet.paste(frame, (x, y + label_h))
+        draw.rectangle((x, y, x + tile_w, y + label_h), fill="#082f2e")
+        draw.rectangle((x, y, x + tile_w - 1, y + tile_h + label_h - 1), outline="#2dd4bf", width=3)
+        draw.text((x + 18, y + 12), f"Image{index + 1}", fill="#ffffff", font=font)
+
+    output = BytesIO()
+    sheet.save(output, format="JPEG", quality=88, optimize=True, progressive=True)
+    content = output.getvalue()
+    return {
+        "filename": "reference_sheet.jpg",
+        "content_type": "image/jpeg",
+        "content": content,
+        "b64": base64.b64encode(content).decode("utf-8"),
+    }
+
+
+def visual_video_references_enabled() -> bool:
+    return settings.VIDEO_REFERENCE_MODE.strip().lower() in {"visual", "video", "direct"}
+
+
+async def extract_audio_from_video_upload(upload: Dict[str, str]) -> Optional[Dict[str, str]]:
+    if not settings.EXTRACT_AUDIO_FROM_VIDEO:
+        return None
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        logger.warning("ffmpeg is not installed; cannot extract audio from video reference")
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="aigate_video_audio_") as tmp:
+        tmp_dir = Path(tmp)
+        input_path = tmp_dir / "source_video"
+        output_path = tmp_dir / "audio_reference.mp3"
+        input_path.write_bytes(upload["content"])
+
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(input_path),
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            "-b:a",
+            "128k",
+            str(output_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            logger.warning("ffmpeg audio extraction timed out")
+            return None
+
+        if process.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
+            logger.warning("ffmpeg audio extraction failed: %s", stderr.decode("utf-8", errors="ignore")[:600])
+            return None
+
+        content = output_path.read_bytes()
+        return {
+            "filename": "video_audio_reference.mp3",
+            "content_type": "audio/mpeg",
+            "content": content,
+            "b64": base64.b64encode(content).decode("utf-8"),
+        }
 
 
 def cloudinary_signature(params: Dict[str, str]) -> str:
@@ -436,6 +716,7 @@ async def api_config():
         "max_image_references": settings.MAX_IMAGE_REFERENCES,
         "max_upload_mb": settings.MAX_UPLOAD_MB,
         "max_prompt_length": settings.MAX_PROMPT_LENGTH,
+        "max_generation_prompt_length": settings.MAX_GENERATION_PROMPT_LENGTH,
     }
 
 
@@ -523,35 +804,79 @@ async def api_generate(request: Request):
     video_uploads = await read_uploads([video_file] if video_file else None, limit=1, expected_prefix="video/", label="video reference")
     audio_uploads = await read_uploads([audio_file] if audio_file else None, limit=1, expected_prefix="audio/", label="audio reference")
 
-    image_urls = await try_upload_refs_to_cloudinary(image_uploads, resource_type="image", prefix="image")
-    video_urls = await try_upload_refs_to_cloudinary(video_uploads, resource_type="video", prefix="video")
+    source_image_count = len(image_uploads)
+    instruction_indexes = instruction_image_indexes(prompt, source_image_count)
+    ocr_instruction_texts = await extract_instruction_texts_from_images(prompt, image_uploads)
+    missing_ocr_indexes = [index for index in instruction_indexes if index not in ocr_instruction_texts]
+    if missing_ocr_indexes:
+        missing = ", ".join(f"@Image{index}" for index in missing_ocr_indexes)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Не удалось прочитать текст инструкции из {missing}. "
+                "Загрузите более чёткую картинку или вставьте текст инструкции в промпт."
+            ),
+        )
+
+    explicit_audio_count = len(audio_uploads)
+    use_image_sheet = image_reference_sheet_enabled()
+    image_payload_uploads = build_image_reference_uploads(image_uploads) if use_image_sheet else image_uploads
+    use_visual_video = visual_video_references_enabled()
+    video_payload_uploads = video_uploads if use_visual_video else []
+
+    extracted_audio_upload = None
+    if video_uploads and settings.EXTRACT_AUDIO_FROM_VIDEO:
+        extracted_audio_upload = await extract_audio_from_video_upload(video_uploads[0])
+        if extracted_audio_upload and not audio_uploads:
+            audio_uploads = [extracted_audio_upload]
+        elif not extracted_audio_upload and not audio_uploads and not use_visual_video:
+            raise HTTPException(
+                status_code=400,
+                detail="Не удалось извлечь аудио из видео-референса. Загрузите аудио отдельно или включите VIDEO_REFERENCE_MODE=visual.",
+            )
+
+    if video_uploads and not use_visual_video and audio_uploads:
+        prompt = rewrite_video_tags_to_audio(prompt)
+
+    image_urls = await try_upload_refs_to_cloudinary(image_payload_uploads, resource_type="image", prefix="image")
+    video_urls = await try_upload_refs_to_cloudinary(video_payload_uploads, resource_type="video", prefix="video")
     audio_urls = await try_upload_refs_to_cloudinary(audio_uploads, resource_type="video", prefix="audio")
 
-    images_b64 = [item["b64"] for item in image_uploads] or images_b64
-    video_b64 = video_uploads[0]["b64"] if video_uploads else video_b64
+    images_b64 = [item["b64"] for item in image_payload_uploads] or images_b64
+    video_b64 = video_payload_uploads[0]["b64"] if video_payload_uploads else None
     audio_b64 = audio_uploads[0]["b64"] if audio_uploads else audio_b64
     video_url = video_urls[0] if video_urls else None
     audio_url = audio_urls[0] if audio_urls else None
-    refs_count = len(images_b64) + (1 if video_b64 else 0) + (1 if audio_b64 else 0)
+    refs_count = source_image_count + (1 if video_uploads else 0) + (1 if explicit_audio_count else 0)
     prompt = normalize_reference_tags(
         prompt,
-        max(len(image_urls), len(images_b64)),
+        source_image_count,
         bool(video_url or video_b64),
         bool(audio_url or audio_b64),
+        image_sheet=use_image_sheet and source_image_count > 1,
     )
+    prompt = add_ocr_instruction_text(prompt, ocr_instruction_texts)
+    prompt = add_negative_constraints_to_prompt(prompt, negative_prompt)
+    if len(prompt) > settings.MAX_GENERATION_PROMPT_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Промпт после OCR/negative длиннее {settings.MAX_GENERATION_PROMPT_LENGTH} символов",
+        )
 
     if refs_count:
-        if not (image_urls or images_b64 or video_url or video_b64):
+        if not (image_urls or images_b64 or video_url or video_b64 or audio_url or audio_b64):
             raise HTTPException(
                 status_code=400,
                 detail="Для референсной генерации нужен хотя бы фото- или видео-референс.",
             )
 
         logger.info(
-            "Using catalog model with references: selected_mode=%s model=%s image_urls=%s image_b64=%s "
-            "video_url=%s video_b64=%s audio_url=%s audio_b64=%s",
+            "Using catalog model with references: selected_mode=%s model=%s source_images=%s image_payloads=%s "
+            "image_urls=%s image_b64=%s video_url=%s video_b64=%s audio_url=%s audio_b64=%s",
             model_mode,
             model,
+            source_image_count,
+            len(image_payload_uploads),
             len(image_urls),
             len(images_b64),
             bool(video_url),

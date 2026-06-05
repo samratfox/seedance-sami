@@ -396,6 +396,12 @@ textarea:focus {
   color: var(--text);
 }
 
+.references-panel.drag-over,
+.dropzone.drag-over {
+  border-color: var(--teal);
+  background: #102522;
+}
+
 .dropzone small {
   color: var(--muted);
 }
@@ -492,10 +498,16 @@ textarea:focus {
   white-space: nowrap;
 }
 
-.reference-tile button {
+.reference-tile-actions {
   position: absolute;
   top: 5px;
   right: 5px;
+  display: grid;
+  grid-template-columns: repeat(3, 26px);
+  gap: 4px;
+}
+
+.reference-tile-actions button {
   display: grid;
   place-items: center;
   width: 26px;
@@ -503,6 +515,13 @@ textarea:focus {
   border: 0;
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.72);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.reference-tile-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .control-group {

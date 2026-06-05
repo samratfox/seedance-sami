@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     DATABASE_PATH: str = "data/bot.db"
     MEDIA_DIR: str = "media"
     MAX_PROMPT_LENGTH: int = 3500
+    MAX_GENERATION_PROMPT_LENGTH: int = 12000
     MAX_UPLOAD_MB: int = 16
     MAX_IMAGE_REFERENCES: int = 6
 
@@ -29,6 +30,14 @@ class Settings(BaseSettings):
     CLOUDINARY_CLOUD_NAME: str = ""
     CLOUDINARY_API_KEY: str = ""
     CLOUDINARY_API_SECRET: str = ""
+    EXTRACT_AUDIO_FROM_VIDEO: bool = True
+    VIDEO_REFERENCE_MODE: str = "audio"
+    MULTI_IMAGE_REFERENCE_MODE: str = "separate"
+    STRICT_MULTI_IMAGE_REFERENCES: bool = True
+    ENABLE_IMAGE_OCR: bool = True
+    OCR_LANG: str = "eng+rus"
+    OCR_MAX_CHARS_PER_IMAGE: int = 10000
+    OCR_MIN_TEXT_CHARS: int = 20
 
     # Local UI preview only. Keep false on a real server.
     ALLOW_DEV_AUTH: bool = False

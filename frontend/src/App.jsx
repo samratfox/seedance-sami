@@ -313,6 +313,7 @@ export default function App() {
   const [videoPreview, setVideoPreview] = useState("");
   const [audioFile, setAudioFile] = useState(null);
   const [audioPreview, setAudioPreview] = useState("");
+  const [draggingRefs, setDraggingRefs] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [generation, setGeneration] = useState(null);
@@ -433,13 +434,49 @@ export default function App() {
     return () => URL.revokeObjectURL(url);
   }, [audioFile]);
 
+  function isFileKind(file, kind, extensions) {
+    const type = file.type || "";
+    const name = file.name || "";
+    return type.startsWith(`${kind}/`) || extensions.some((ext) => name.toLowerCase().endsWith(ext));
+  }
+
   function addImageFiles(fileList) {
-    const incoming = Array.from(fileList || []).filter((file) => file.type.startsWith("image/"));
+    const incoming = Array.from(fileList || []).filter((file) =>
+      isFileKind(file, "image", [".png", ".jpg", ".jpeg", ".webp", ".gif"])
+    );
     setImageFiles((current) => [...current, ...incoming].slice(0, config.max_image_references));
+  }
+
+  function addReferenceFiles(fileList) {
+    const files = Array.from(fileList || []);
+    const images = files.filter((file) => isFileKind(file, "image", [".png", ".jpg", ".jpeg", ".webp", ".gif"]));
+    const video = files.find((file) => isFileKind(file, "video", [".mp4", ".mov", ".webm", ".mkv"]));
+    const audioRef = files.find((file) => isFileKind(file, "audio", [".mp3", ".wav", ".m4a", ".aac", ".ogg"]));
+
+    if (images.length) setImageFiles((current) => [...current, ...images].slice(0, config.max_image_references));
+    if (video) setVideoFile(video);
+    if (audioRef) setAudioFile(audioRef);
+  }
+
+  function handleReferenceDrop(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    setDraggingRefs(false);
+    addReferenceFiles(event.dataTransfer?.files);
   }
 
   function removeImage(index) {
     setImageFiles((current) => current.filter((_, i) => i !== index));
+  }
+
+  function moveImage(index, direction) {
+    setImageFiles((current) => {
+      const target = index + direction;
+      if (target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
   }
 
   function appendToPrompt(text) {
@@ -576,15 +613,23 @@ export default function App() {
           </section>
 
           {/* References */}
-          <section className="panel">
+          <section
+            className={`panel references-panel ${draggingRefs ? "drag-over" : ""}`}
+            onDragEnter={(event) => { event.preventDefault(); setDraggingRefs(true); }}
+            onDragOver={(event) => { event.preventDefault(); setDraggingRefs(true); }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setDraggingRefs(false);
+            }}
+            onDrop={handleReferenceDrop}
+          >
             <div className="section-title">
               <span>Референсы</span>
               <small>{imageFiles.length}/{config.max_image_references} фото</small>
             </div>
             <input ref={imageInputRef} type="file" accept="image/*" multiple className="hidden-input" onChange={(e) => addImageFiles(e.target.files)} />
-            <button className="dropzone" type="button" onClick={() => imageInputRef.current?.click()}>
+            <button className={`dropzone ${draggingRefs ? "drag-over" : ""}`} type="button" onClick={() => imageInputRef.current?.click()}>
               <span>Добавить фото-референсы</span>
-              <small>до {config.max_image_references} шт.</small>
+              <small>до {config.max_image_references} фото; видео и аудио можно перетащить сюда</small>
             </button>
             {imagePreviews.length > 0 && (
               <div className="reference-grid">
@@ -592,7 +637,11 @@ export default function App() {
                   <div className="reference-tile" key={item.url}>
                     <img src={item.url} alt={`Фото ${index + 1}`} />
                     <span className="reference-badge">Image{index + 1}</span>
-                    <button type="button" onClick={() => removeImage(index)} aria-label="Удалить фото">x</button>
+                    <div className="reference-tile-actions">
+                      <button type="button" onClick={() => moveImage(index, -1)} disabled={index === 0} aria-label="Сдвинуть влево">&lt;</button>
+                      <button type="button" onClick={() => moveImage(index, 1)} disabled={index === imagePreviews.length - 1} aria-label="Сдвинуть вправо">&gt;</button>
+                      <button type="button" onClick={() => removeImage(index)} aria-label="Удалить фото">x</button>
+                    </div>
                   </div>
                 ))}
               </div>
