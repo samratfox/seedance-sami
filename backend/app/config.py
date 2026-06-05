@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     OCR_LANG: str = "eng+rus"
     OCR_MAX_CHARS_PER_IMAGE: int = 10000
     OCR_MIN_TEXT_CHARS: int = 20
+    PREPARE_IMAGE_REFERENCES: bool = True
+    REFERENCE_CANVAS_LONG_EDGE: int = 1536
+    REFERENCE_PAD_MODE: str = "blur"
 
     # Local UI preview only. Keep false on a real server.
     ALLOW_DEV_AUTH: bool = False

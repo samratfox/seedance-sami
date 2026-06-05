@@ -21,6 +21,7 @@
 - 1 аудио-референс экспериментально через `input_audio_b64` / `provider_options`
 - OCR для фото-инструкций: если промпт пишет `instruction from @Image2`, backend распознаёт текст из `@Image2` и добавляет его в запрос
 - поле ручного промпта ограничено `MAX_PROMPT_LENGTH=3500`, но OCR-текст с картинки может расширять итоговый серверный промпт до `MAX_GENERATION_PROMPT_LENGTH=12000`
+- no-crop подготовка фото-референсов: вертикальные фото перед отправкой вписываются целиком в canvas выбранного формата, чтобы `16:9` не резал лицо/голову/одежду по центру
 - Видео-референс в режиме `VIDEO_REFERENCE_MODE=audio`: backend через FFmpeg вытаскивает аудио из видео и отправляет его как аудио-референс
 - Промпт, negative prompt, seed
 - Длительность 4-15 секунд, разрешение, формат, звук
@@ -74,6 +75,7 @@ STANDARD_PRICE_1080P=0.10206
 - аудио-референс отправляется экспериментально как `input_audio_b64` и `provider_options.audio_reference_b64`
 - если загружено видео и `VIDEO_REFERENCE_MODE=audio`, видео не отправляется как visual-reference; из него через FFmpeg извлекается аудио
 - если промпт явно просит `instruction/text/prompt from @ImageN`, backend сначала распознаёт текст с этой картинки через OCR
+- при `PREPARE_IMAGE_REFERENCES=true` фото-референсы отправляются в no-crop виде под выбранный aspect ratio
 - `negative_prompt` отправляется отдельным API-полем и дополнительно добавляется в текст запроса как `Negative constraints / avoid`
 - при `STRICT_MULTI_IMAGE_REFERENCES=true` backend не повторяет генерацию только с первым фото; если провайдер не принял multi-reference, пользователь увидит ошибку
 

@@ -402,6 +402,11 @@ textarea:focus {
   background: #102522;
 }
 
+.app-shell.drag-over .references-panel {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.28);
+}
+
 .dropzone small {
   color: var(--muted);
 }
@@ -473,6 +478,23 @@ textarea:focus {
   aspect-ratio: 1 / 1;
   border: 1px solid var(--line);
   border-radius: 8px;
+  background: #111;
+  cursor: grab;
+  user-select: none;
+}
+
+.reference-tile:active {
+  cursor: grabbing;
+}
+
+.reference-tile.is-dragging {
+  opacity: 0.42;
+  transform: scale(0.98);
+}
+
+.reference-tile.drop-target {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.34);
 }
 
 .reference-tile img {

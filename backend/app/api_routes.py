@@ -165,7 +165,8 @@ def normalize_reference_tags(
             f"Reference map: {image_map}. "
             "Treat each @ImageN as a separate source. Do not merge identities, outfits, objects, or instructions "
             "between different image references. When the prompt mentions @ImageN, apply only that referenced image "
-            "to that specific character, object, scene beat, or instruction."
+            "to that specific character, object, scene beat, or instruction. Keep the referenced subject's full head, "
+            "face, and important outfit details in frame unless the user explicitly asks for a close-up crop."
         )
     if image_count and not re.search(r"@Image\d+", prompt, flags=re.IGNORECASE):
         image_tags = ", ".join(f"@Image{index}" for index in range(1, image_count + 1))
@@ -385,6 +386,72 @@ def build_image_reference_uploads(uploads: List[Dict[str, str]]) -> List[Dict[st
 
 def image_reference_sheet_enabled() -> bool:
     return settings.MULTI_IMAGE_REFERENCE_MODE.strip().lower() in {"sheet", "reference_sheet", "combined"}
+
+
+def parse_aspect_ratio(ratio: str) -> float:
+    try:
+        left, right = (ratio or "16:9").split(":", 1)
+        width = float(left.strip())
+        height = float(right.strip())
+        if width > 0 and height > 0:
+            return width / height
+    except Exception:
+        pass
+    return 16 / 9
+
+
+def make_no_crop_reference(upload: Dict[str, str], ratio: str, index: int) -> Dict[str, str]:
+    if not settings.PREPARE_IMAGE_REFERENCES:
+        return upload
+
+    try:
+        source = Image.open(BytesIO(upload["content"]))
+        source = ImageOps.exif_transpose(source).convert("RGB")
+    except Exception as exc:
+        logger.warning("Cannot prepare no-crop image reference %s: %s", index, exc)
+        return upload
+
+    target_ratio = parse_aspect_ratio(ratio)
+    long_edge = max(512, int(settings.REFERENCE_CANVAS_LONG_EDGE))
+    if target_ratio >= 1:
+        canvas_w = long_edge
+        canvas_h = max(1, round(long_edge / target_ratio))
+    else:
+        canvas_h = long_edge
+        canvas_w = max(1, round(long_edge * target_ratio))
+
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    fit = source.copy()
+    fit.thumbnail((canvas_w, canvas_h), resample)
+
+    if settings.REFERENCE_PAD_MODE.strip().lower() == "blur":
+        background = ImageOps.fit(source.copy(), (canvas_w, canvas_h), method=resample, centering=(0.5, 0.5))
+        try:
+            from PIL import ImageFilter
+
+            background = background.filter(ImageFilter.GaussianBlur(radius=28))
+        except Exception:
+            pass
+    else:
+        background = Image.new("RGB", (canvas_w, canvas_h), "#111111")
+
+    x = (canvas_w - fit.width) // 2
+    y = (canvas_h - fit.height) // 2
+    background.paste(fit, (x, y))
+
+    output = BytesIO()
+    background.save(output, format="JPEG", quality=94, optimize=True, progressive=True)
+    content = output.getvalue()
+    return {
+        "filename": f"reference_{index}_no_crop.jpg",
+        "content_type": "image/jpeg",
+        "content": content,
+        "b64": base64.b64encode(content).decode("utf-8"),
+    }
+
+
+def prepare_image_reference_uploads(uploads: List[Dict[str, str]], ratio: str) -> List[Dict[str, str]]:
+    return [make_no_crop_reference(upload, ratio, index) for index, upload in enumerate(uploads, start=1)]
 
 
 def build_image_reference_sheet(uploads: List[Dict[str, str]]) -> Dict[str, str]:
@@ -820,7 +887,8 @@ async def api_generate(request: Request):
 
     explicit_audio_count = len(audio_uploads)
     use_image_sheet = image_reference_sheet_enabled()
-    image_payload_uploads = build_image_reference_uploads(image_uploads) if use_image_sheet else image_uploads
+    prepared_image_uploads = prepare_image_reference_uploads(image_uploads, ratio)
+    image_payload_uploads = build_image_reference_uploads(prepared_image_uploads) if use_image_sheet else prepared_image_uploads
     use_visual_video = visual_video_references_enabled()
     video_payload_uploads = video_uploads if use_visual_video else []
 

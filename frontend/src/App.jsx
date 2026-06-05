@@ -314,6 +314,8 @@ export default function App() {
   const [audioFile, setAudioFile] = useState(null);
   const [audioPreview, setAudioPreview] = useState("");
   const [draggingRefs, setDraggingRefs] = useState(false);
+  const [draggedImageIndex, setDraggedImageIndex] = useState(null);
+  const [imageDropIndex, setImageDropIndex] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [generation, setGeneration] = useState(null);
@@ -458,11 +460,32 @@ export default function App() {
     if (audioRef) setAudioFile(audioRef);
   }
 
-  function handleReferenceDrop(event) {
+  function hasDraggedFiles(event) {
+    return Array.from(event.dataTransfer?.types || []).includes("Files");
+  }
+
+  function handleAppDragOver(event) {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDraggingRefs(true);
+  }
+
+  function handleAppDrop(event) {
+    if (!hasDraggedFiles(event)) return;
     event.preventDefault();
     event.stopPropagation();
     setDraggingRefs(false);
     addReferenceFiles(event.dataTransfer?.files);
+  }
+
+  function handleReferenceDrop(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    setDraggingRefs(false);
+    if (hasDraggedFiles(event)) {
+      addReferenceFiles(event.dataTransfer?.files);
+    }
   }
 
   function removeImage(index) {
@@ -477,6 +500,54 @@ export default function App() {
       [next[index], next[target]] = [next[target], next[index]];
       return next;
     });
+  }
+
+  function reorderImage(fromIndex, toIndex) {
+    setImageFiles((current) => {
+      if (fromIndex === null || toIndex === null || !Number.isFinite(fromIndex) || !Number.isFinite(toIndex)) return current;
+      if (fromIndex === toIndex) return current;
+      if (fromIndex < 0 || toIndex < 0 || fromIndex >= current.length || toIndex >= current.length) return current;
+      const next = [...current];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next;
+    });
+  }
+
+  function handleImageDragStart(event, index) {
+    setDraggedImageIndex(index);
+    setImageDropIndex(index);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-sami-image-index", String(index));
+    event.dataTransfer.setData("text/plain", `Image${index + 1}`);
+  }
+
+  function handleImageDragOver(event, index) {
+    if (hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    setImageDropIndex(index);
+  }
+
+  function handleImageDrop(event, index) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (hasDraggedFiles(event)) {
+      addReferenceFiles(event.dataTransfer?.files);
+      setDraggingRefs(false);
+    } else {
+      const rawIndex = event.dataTransfer.getData("application/x-sami-image-index");
+      const fromIndex = rawIndex === "" ? draggedImageIndex : Number(rawIndex);
+      reorderImage(fromIndex, index);
+    }
+    setDraggedImageIndex(null);
+    setImageDropIndex(null);
+  }
+
+  function handleImageDragEnd() {
+    setDraggedImageIndex(null);
+    setImageDropIndex(null);
   }
 
   function appendToPrompt(text) {
@@ -528,7 +599,19 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell ${draggingRefs ? "drag-over" : ""}`}
+      onDragEnter={(event) => {
+        if (!hasDraggedFiles(event)) return;
+        event.preventDefault();
+        setDraggingRefs(true);
+      }}
+      onDragOver={handleAppDragOver}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setDraggingRefs(false);
+      }}
+      onDrop={handleAppDrop}
+    >
       <header className="topbar">
         <div className="brand-mark cat-avatar"><img src={CAT_AVATAR} alt="Sami" /></div>
         <div className="brand-copy">
@@ -634,7 +717,15 @@ export default function App() {
             {imagePreviews.length > 0 && (
               <div className="reference-grid">
                 {imagePreviews.map((item, index) => (
-                  <div className="reference-tile" key={item.url}>
+                  <div
+                    className={`reference-tile ${draggedImageIndex === index ? "is-dragging" : ""} ${imageDropIndex === index && draggedImageIndex !== null ? "drop-target" : ""}`}
+                    key={item.url}
+                    draggable
+                    onDragStart={(event) => handleImageDragStart(event, index)}
+                    onDragOver={(event) => handleImageDragOver(event, index)}
+                    onDrop={(event) => handleImageDrop(event, index)}
+                    onDragEnd={handleImageDragEnd}
+                  >
                     <img src={item.url} alt={`Фото ${index + 1}`} />
                     <span className="reference-badge">Image{index + 1}</span>
                     <div className="reference-tile-actions">
