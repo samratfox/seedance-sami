@@ -37,7 +37,8 @@ def validate_telegram_init_data(init_data: str) -> Dict:
     if not received_hash:
         raise HTTPException(status_code=403, detail="Telegram auth hash is missing")
 
-    data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(parsed.items()))
+    data_check_string = "
+".join(f"{key}={value}" for key, value in sorted(parsed.items()))
     secret_key = hmac.new(b"WebAppData", settings.BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
     calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -117,14 +118,14 @@ def form_files(form, key: str) -> List[UploadFile]:
     return [item for item in items if getattr(item, "filename", None)]
 
 
-async def upload_to_b64(
+async def upload_to_0x0st(
     files: Optional[List[UploadFile]],
     *,
     limit: int,
     expected_prefix: str,
     label: str,
 ) -> List[str]:
-    encoded: List[str] = []
+    urls: List[str] = []
     max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
 
     for file in (files or [])[:limit]:
@@ -137,18 +138,40 @@ async def upload_to_b64(
         if len(content) > max_bytes:
             raise HTTPException(status_code=400, detail=f"{label} больше {settings.MAX_UPLOAD_MB} MB")
 
-        encoded.append(base64.b64encode(content).decode("utf-8"))
+        timeout = aiohttp.ClientTimeout(total=30)
+        data = aiohttp.FormData()
+        data.add_field(
+            "file",
+            content,
+            filename=file.filename,
+            content_type=file.content_type or expected_prefix,
+        )
 
-    return encoded
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post("https://0x0.st", data=data) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    raise HTTPException(status_code=500, detail=f"0x0.st upload failed: {text}")
+                url = text.strip()
+                if not url.startswith("http"):
+                    raise HTTPException(status_code=500, detail=f"0x0.st upload failed: {url}")
+                urls.append(url)
+
+    return urls
 
 
-async def upload_one_to_b64(
+async def upload_one_to_0x0st(
     file: Optional[UploadFile],
     *,
     expected_prefix: str,
     label: str,
 ) -> Optional[str]:
-    values = await upload_to_b64([file] if file else None, limit=1, expected_prefix=expected_prefix, label=label)
+    values = await upload_to_0x0st(
+        [file] if file else None,
+        limit=1,
+        expected_prefix=expected_prefix,
+        label=label,
+    )
     return values[0] if values else None
 
 
@@ -228,13 +251,23 @@ async def notify_generation_completed(
 ) -> None:
     result_url = public_url(result_url)
     text = (
-        "Видео готово\n\n"
-        f"Задача: #{generation_id}\n"
-        f"Режим: {quality} ({model})\n"
-        f"Параметры: {duration} c / {resolution} / {ratio}\n"
-        f"Звук: {'да' if audio else 'нет'}\n"
-        f"Референсы: {refs_count}\n\n"
-        f"Промпт: {prompt_preview(prompt)}\n\n"
+        "Видео готово
+
+"
+        f"Задача: #{generation_id}
+"
+        f"Режим: {quality} ({model})
+"
+        f"Параметры: {duration} c / {resolution} / {ratio}
+"
+        f"Звук: {'да' if audio else 'нет'}
+"
+        f"Референсы: {refs_count}
+
+"
+        f"Промпт: {prompt_preview(prompt)}
+
+"
         f"Ссылка: {result_url}"
     )
     await send_telegram_message(telegram_id, text, result_url=result_url)
@@ -255,13 +288,23 @@ async def notify_generation_failed(
     error: str,
 ) -> None:
     text = (
-        "Генерация не удалась\n\n"
-        f"Задача: #{generation_id}\n"
-        f"Режим: {quality} ({model})\n"
-        f"Параметры: {duration} c / {resolution} / {ratio}\n"
-        f"Звук: {'да' if audio else 'нет'}\n"
-        f"Референсы: {refs_count}\n\n"
-        f"Ошибка: {error}\n\n"
+        "Генерация не удалась
+
+"
+        f"Задача: #{generation_id}
+"
+        f"Режим: {quality} ({model})
+"
+        f"Параметры: {duration} c / {resolution} / {ratio}
+"
+        f"Звук: {'да' if audio else 'нет'}
+"
+        f"Референсы: {refs_count}
+
+"
+        f"Ошибка: {error}
+
+"
         f"Промпт: {prompt_preview(prompt)}"
     )
     await send_telegram_message(telegram_id, text)
@@ -356,15 +399,23 @@ async def api_generate(request: Request):
     if not model:
         raise HTTPException(status_code=500, detail=f"Model id for {model_mode} is not configured")
 
-    images_b64 = await upload_to_b64(
+    image_urls = await upload_to_0x0st(
         image_files,
         limit=settings.MAX_IMAGE_REFERENCES,
         expected_prefix="image/",
         label="Фото-референс",
     )
-    video_b64 = await upload_one_to_b64(video_file, expected_prefix="video/", label="Видео-референс")
-    audio_b64 = await upload_one_to_b64(audio_file, expected_prefix="audio/", label="Аудио-референс")
-    refs_count = len(images_b64) + (1 if video_b64 else 0) + (1 if audio_b64 else 0)
+    video_url = await upload_one_to_0x0st(
+        video_file,
+        expected_prefix="video/",
+        label="Видео-референс",
+    )
+    audio_url = await upload_one_to_0x0st(
+        audio_file,
+        expected_prefix="audio/",
+        label="Аудио-референс",
+    )
+    refs_count = len(image_urls) + (1 if video_url else 0) + (1 if audio_url else 0)
 
     generation_id = await db.create_generation(
         user_db_id=user["id"],
@@ -389,9 +440,9 @@ async def api_generate(request: Request):
             model=model,
             prompt=prompt,
             negative_prompt=negative_prompt or None,
-            images_b64=images_b64,
-            video_b64=video_b64,
-            audio_b64=audio_b64,
+            image_urls=image_urls or None,
+            video_url=video_url,
+            audio_url=audio_url,
             duration=duration,
             resolution=resolution,
             ratio=ratio,
@@ -419,9 +470,9 @@ async def run_generation(
     model: str,
     prompt: str,
     negative_prompt: Optional[str],
-    images_b64: List[str],
-    video_b64: Optional[str],
-    audio_b64: Optional[str],
+    image_urls: List[str],
+    video_url: Optional[str],
+    audio_url: Optional[str],
     duration: int,
     resolution: str,
     ratio: str,
@@ -444,9 +495,9 @@ async def run_generation(
         result = await client.generate_video(
             model=model,
             prompt=prompt,
-            images_b64=images_b64 or None,
-            video_b64=video_b64,
-            audio_b64=audio_b64,
+            image_urls=image_urls or None,
+            video_url=video_url,
+            audio_url=audio_url,
             duration=duration,
             resolution=resolution,
             aspect_ratio=ratio,
