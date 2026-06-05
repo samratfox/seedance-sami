@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import parse_qsl
 
+import aiohttp
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 
 from app.api_client import AIGateClient, AIGateError, extract_video_url, format_balance
@@ -120,6 +121,115 @@ def local_video_path(generation_id: int) -> Path:
     directory = Path(settings.MEDIA_DIR) / "generations"
     directory.mkdir(parents=True, exist_ok=True)
     return directory / f"{generation_id}.mp4"
+
+
+def public_url(url: str) -> str:
+    if not url:
+        return ""
+    if url.startswith(("http://", "https://")):
+        return url
+    base = settings.WEBAPP_URL.rstrip("/")
+    return f"{base}{url if url.startswith('/') else f'/{url}'}" if base else url
+
+
+def prompt_preview(prompt: str, limit: int = 520) -> str:
+    prompt = " ".join(prompt.split())
+    if len(prompt) <= limit:
+        return prompt
+    return f"{prompt[:limit].rstrip()}..."
+
+
+async def send_telegram_message(
+    telegram_id: int,
+    text: str,
+    *,
+    result_url: str = "",
+) -> None:
+    if not settings.BOT_TOKEN:
+        return
+
+    reply_markup = None
+    buttons = []
+    if result_url:
+        buttons.append([{"text": "Скачать видео", "url": result_url}])
+    if buttons:
+        reply_markup = {"inline_keyboard": buttons}
+
+    payload = {
+        "chat_id": telegram_id,
+        "text": text[:3900],
+        "disable_web_page_preview": False,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"https://api.telegram.org/bot{settings.BOT_TOKEN}/sendMessage",
+                json=payload,
+            ) as response:
+                data = await response.json(content_type=None)
+                if response.status >= 400 or not data.get("ok"):
+                    logger.warning("Telegram notification failed: %s", data)
+    except Exception:
+        logger.exception("Could not send Telegram notification")
+
+
+async def notify_generation_completed(
+    *,
+    telegram_id: int,
+    generation_id: int,
+    result_url: str,
+    model: str,
+    quality: str,
+    duration: int,
+    resolution: str,
+    ratio: str,
+    audio: bool,
+    refs_count: int,
+    prompt: str,
+) -> None:
+    result_url = public_url(result_url)
+    text = (
+        "Видео готово\n\n"
+        f"Задача: #{generation_id}\n"
+        f"Режим: {quality} ({model})\n"
+        f"Параметры: {duration} c / {resolution} / {ratio}\n"
+        f"Звук: {'да' if audio else 'нет'}\n"
+        f"Референсы: {refs_count}\n\n"
+        f"Промпт: {prompt_preview(prompt)}\n\n"
+        f"Ссылка: {result_url}"
+    )
+    await send_telegram_message(telegram_id, text, result_url=result_url)
+
+
+async def notify_generation_failed(
+    *,
+    telegram_id: int,
+    generation_id: int,
+    model: str,
+    quality: str,
+    duration: int,
+    resolution: str,
+    ratio: str,
+    audio: bool,
+    refs_count: int,
+    prompt: str,
+    error: str,
+) -> None:
+    text = (
+        "Генерация не удалась\n\n"
+        f"Задача: #{generation_id}\n"
+        f"Режим: {quality} ({model})\n"
+        f"Параметры: {duration} c / {resolution} / {ratio}\n"
+        f"Звук: {'да' if audio else 'нет'}\n"
+        f"Референсы: {refs_count}\n\n"
+        f"Ошибка: {error}\n\n"
+        f"Промпт: {prompt_preview(prompt)}"
+    )
+    await send_telegram_message(telegram_id, text)
 
 
 @router.get("/health")
@@ -252,6 +362,7 @@ async def api_generate(
             audio=audio,
             quality=model_mode,
             seed=seed,
+            refs_count=refs_count,
         )
     )
 
@@ -281,6 +392,7 @@ async def run_generation(
     audio: bool,
     quality: str,
     seed: Optional[int],
+    refs_count: int,
 ):
     client = AIGateClient(api_key)
     try:
@@ -348,14 +460,53 @@ async def run_generation(
             progress=100,
             result_url=result_url,
         )
+        await notify_generation_completed(
+            telegram_id=telegram_id,
+            generation_id=generation_id,
+            result_url=result_url,
+            model=model,
+            quality=quality,
+            duration=duration,
+            resolution=resolution,
+            ratio=ratio,
+            audio=audio,
+            refs_count=refs_count,
+            prompt=prompt,
+        )
     except AIGateError as exc:
         logger.warning("AIGate generation %s failed: %s", generation_id, exc, exc_info=True)
         await db.update_generation_status(generation_id, "failed", error_message=str(exc))
         await manager.send_progress(telegram_id, generation_id, "failed", str(exc), progress=100)
+        await notify_generation_failed(
+            telegram_id=telegram_id,
+            generation_id=generation_id,
+            model=model,
+            quality=quality,
+            duration=duration,
+            resolution=resolution,
+            ratio=ratio,
+            audio=audio,
+            refs_count=refs_count,
+            prompt=prompt,
+            error=str(exc),
+        )
     except Exception as exc:
         logger.exception("Generation %s failed unexpectedly", generation_id)
         await db.update_generation_status(generation_id, "failed", error_message=str(exc))
         await manager.send_progress(telegram_id, generation_id, "failed", str(exc), progress=100)
+        await notify_generation_failed(
+            telegram_id=telegram_id,
+            generation_id=generation_id,
+            model=model,
+            quality=quality,
+            duration=duration,
+            resolution=resolution,
+            ratio=ratio,
+            audio=audio,
+            refs_count=refs_count,
+            prompt=prompt,
+            error=str(exc),
+        )
 
 
 @router.post("/api/history")

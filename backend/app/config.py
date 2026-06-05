@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     DATABASE_PATH: str = "data/bot.db"
     MEDIA_DIR: str = "media"
-    MAX_PROMPT_LENGTH: int = 1000
+    MAX_PROMPT_LENGTH: int = 3500
     MAX_UPLOAD_MB: int = 16
     MAX_IMAGE_REFERENCES: int = 6
 
@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     ALLOW_DEV_AUTH: bool = False
     DEV_TELEGRAM_ID: int = 100000001
 
-    SUPPORTED_RATIOS: List[str] = Field(default_factory=lambda: ["16:9", "9:16", "1:1", "4:3"])
+    SUPPORTED_RATIOS: List[str] = Field(default_factory=lambda: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"])
     SUPPORTED_RESOLUTIONS: List[str] = Field(default_factory=lambda: ["480p", "720p", "1080p"])
     FAST_MODEL_ID: str = "bytedance/seedance-2.0-fast"
     STANDARD_MODEL_ID: str = "bytedance/seedance-2.0"

@@ -18,7 +18,7 @@ const DEFAULT_CONFIG = {
   referral_url: "https://aigate.shop",
   durations: Array.from({ length: 12 }, (_, index) => index + 4),
   resolutions: ["480p", "720p", "1080p"],
-  ratios: ["Auto", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"],
+  ratios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
   qualities: ["fast", "standard"],
   model_modes: {
     fast: {
@@ -44,7 +44,7 @@ const DEFAULT_CONFIG = {
   },
   max_image_references: 6,
   max_upload_mb: 16,
-  max_prompt_length: 1000,
+  max_prompt_length: 3500,
 };
 
 const CAMERA_PRESETS = [
