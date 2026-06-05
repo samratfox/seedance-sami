@@ -1,7 +1,7 @@
 """Application configuration."""
 
 import os
-from typing import List
+from typing import Any, List
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     BOT_TOKEN: str = ""
-    ADMIN_IDS: List[int] = Field(default_factory=list)
+    ADMIN_IDS: Any = Field(default_factory=list)
 
     DATABASE_PATH: str = "data/bot.db"
     MEDIA_DIR: str = "media"
@@ -21,12 +21,11 @@ class Settings(BaseSettings):
     WEBAPP_PORT: int = Field(default_factory=lambda: int(os.getenv("PORT", "8080")))
     WEBAPP_URL: str = "https://your-domain.vercel.app"
     REFERRAL_URL: str = "https://aigate.shop"
-    CORS_ORIGINS: List[str] = Field(default_factory=list)
+    CORS_ORIGINS: Any = Field(default_factory=list)
 
     PROVIDER_API_BASE: str = "https://api.aigate.shop/v1"
     TELEGRAM_AUTH_MAX_AGE_SECONDS: int = 86400
 
-    # Cloudinary credentials for image/video/audio hosting
     CLOUDINARY_CLOUD_NAME: str = ""
     CLOUDINARY_API_KEY: str = ""
     CLOUDINARY_API_SECRET: str = ""
@@ -35,8 +34,8 @@ class Settings(BaseSettings):
     ALLOW_DEV_AUTH: bool = False
     DEV_TELEGRAM_ID: int = 100000001
 
-    SUPPORTED_RATIOS: List[str] = Field(default_factory=lambda: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"])
-    SUPPORTED_RESOLUTIONS: List[str] = Field(default_factory=lambda: ["480p", "720p", "1080p"])
+    SUPPORTED_RATIOS: Any = Field(default_factory=lambda: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"])
+    SUPPORTED_RESOLUTIONS: Any = Field(default_factory=lambda: ["480p", "720p", "1080p"])
     FAST_MODEL_ID: str = "bytedance/seedance-2.0-fast"
     STANDARD_MODEL_ID: str = "bytedance/seedance-2.0"
     FAST_PRICE_480P: float = 0.01614
@@ -46,8 +45,8 @@ class Settings(BaseSettings):
     STANDARD_PRICE_720P: float = 0.04536
     STANDARD_PRICE_1080P: float = 0.10206
 
-    SUPPORTED_DURATIONS: List[int] = Field(default_factory=lambda: list(range(4, 16)))
-    SUPPORTED_QUALITIES: List[str] = Field(default_factory=lambda: ["fast", "standard"])
+    SUPPORTED_DURATIONS: Any = Field(default_factory=lambda: list(range(4, 16)))
+    SUPPORTED_QUALITIES: Any = Field(default_factory=lambda: ["fast", "standard"])
 
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod
@@ -67,11 +66,14 @@ class Settings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def parse_list(cls, value):
+    def parse_list(cls, value, info):
         if value in (None, ""):
             return []
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
+            items = [item.strip() for item in value.split(",") if item.strip()]
+            if info.field_name == "SUPPORTED_DURATIONS":
+                return [int(item) for item in items]
+            return items
         return value
 
     @property

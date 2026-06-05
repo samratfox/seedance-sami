@@ -103,7 +103,7 @@ function buildAtMenu(imageFiles, videoFile, audioFile) {
   imageFiles.forEach((file, index) => {
     items.push({
       id: `img_${index}`,
-      label: `reference ${index + 1}`,
+      label: `Image${index + 1}`,
       fileName: file.name,
       tag: "фото",
       type: "image",
@@ -113,7 +113,7 @@ function buildAtMenu(imageFiles, videoFile, audioFile) {
   if (videoFile) {
     items.push({
       id: "vid_0",
-      label: "video reference",
+      label: "Video1",
       fileName: videoFile.name,
       tag: "видео",
       type: "video",
@@ -123,7 +123,7 @@ function buildAtMenu(imageFiles, videoFile, audioFile) {
   if (audioFile) {
     items.push({
       id: "aud_0",
-      label: "audio reference",
+      label: "Audio1",
       fileName: audioFile.name,
       tag: "аудио",
       type: "audio",
@@ -205,7 +205,7 @@ function PromptTextarea({ value, onChange, maxLength, imageFiles, videoFile, aud
     const textBefore = value.slice(0, cursor);
     const textAfter = value.slice(cursor);
     const atStart = textBefore.lastIndexOf("@");
-    const insertion = `@${item.label} [${item.tag}]`;
+    const insertion = `@${item.label}`;
     const newValue = textBefore.slice(0, atStart) + insertion + " " + textAfter;
     onChange(newValue);
     setShowAtMenu(false);
@@ -559,7 +559,7 @@ export default function App() {
                 {imagePreviews.map((item, index) => (
                   <div className="reference-tile" key={item.url}>
                     <img src={item.url} alt={`Фото ${index + 1}`} />
-                    <span className="reference-badge">reference {index + 1}</span>
+                    <span className="reference-badge">Image{index + 1}</span>
                     <button type="button" onClick={() => removeImage(index)} aria-label="Удалить фото">x</button>
                   </div>
                 ))}
@@ -617,22 +617,22 @@ export default function App() {
                 {imageFiles.map((f, i) => (
                   <button key={i} type="button" className="at-chip at-chip--image"
                     title={f.name}
-                    onClick={() => appendToPrompt(`@reference ${i + 1} [фото]`)}>
-                    reference {i + 1}
+                    onClick={() => appendToPrompt(`@Image${i + 1}`)}>
+                    Image{i + 1}
                   </button>
                 ))}
                 {videoFile && (
                   <button type="button" className="at-chip at-chip--video"
                     title={videoFile.name}
-                    onClick={() => appendToPrompt("@video reference [видео]")}>
-                    video reference
+                    onClick={() => appendToPrompt("@Video1")}>
+                    Video1
                   </button>
                 )}
                 {audioFile && (
                   <button type="button" className="at-chip at-chip--audio"
                     title={audioFile.name}
-                    onClick={() => appendToPrompt("@audio reference [аудио]")}>
-                    audio reference
+                    onClick={() => appendToPrompt("@Audio1")}>
+                    Audio1
                   </button>
                 )}
               </div>

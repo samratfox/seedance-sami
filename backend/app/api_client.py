@@ -63,7 +63,7 @@ class AIGateClient:
         timeout: int = 30,
         **kwargs,
     ) -> Dict[str, Any]:
-        url = f"{self.base_url}/{endpoint.lstrip('/')}" 
+        url = f"{self.base_url}/{endpoint.lstrip('/')}"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
 
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
@@ -119,8 +119,11 @@ class AIGateClient:
         model: str,
         prompt: str,
         image_urls: Optional[List[str]] = None,
+        images_b64: Optional[List[str]] = None,
         video_url: Optional[str] = None,
+        video_b64: Optional[str] = None,
         audio_url: Optional[str] = None,
+        audio_b64: Optional[str] = None,
         duration: int = 5,
         resolution: str = "720p",
         aspect_ratio: str = "16:9",
@@ -129,56 +132,75 @@ class AIGateClient:
         negative_prompt: Optional[str] = None,
         seed: Optional[int] = None,
     ) -> Dict[str, Any]:
-        payload = self._video_payload(
-            model=model,
-            prompt=prompt,
-            image_urls=image_urls or [],
-            video_url=video_url,
-            audio_url=audio_url,
-            duration=duration,
-            resolution=resolution,
-            aspect_ratio=aspect_ratio,
-            audio=audio,
-            quality=quality,
-            negative_prompt=negative_prompt,
-            seed=seed,
-            include_extra_refs=True,
+        common = {
+            "model": model,
+            "prompt": prompt,
+            "duration": duration,
+            "resolution": resolution,
+            "aspect_ratio": aspect_ratio,
+            "audio": audio,
+            "quality": quality,
+            "negative_prompt": negative_prompt,
+            "seed": seed,
+        }
+
+        use_urls = bool(image_urls or video_url or audio_url)
+        payload = (
+            self._video_url_payload(
+                **common,
+                image_urls=image_urls or [],
+                video_url=video_url,
+                audio_url=audio_url,
+                include_extra_refs=True,
+            )
+            if use_urls
+            else self._video_b64_payload(
+                **common,
+                images_b64=images_b64 or [],
+                video_b64=video_b64,
+                audio_b64=audio_b64,
+                include_extra_refs=True,
+            )
         )
 
         try:
             return await self._request("POST", "/video/generations", timeout=900, json=payload)
         except AIGateError as exc:
-            has_experimental_refs = bool((image_urls and len(image_urls) > 1) or audio_url)
+            has_experimental_refs = bool(
+                (images_b64 and len(images_b64) > 1)
+                or audio_b64
+                or (image_urls and len(image_urls) > 1)
+                or audio_url
+            )
             if exc.status_code == 400 and has_experimental_refs:
                 logger.info("AIGate rejected experimental reference payload; retrying with the official inputs only.")
-                fallback_payload = self._video_payload(
-                    model=model,
-                    prompt=prompt,
-                    image_urls=(image_urls or [])[:1],
-                    video_url=video_url,
-                    audio_url=None,
-                    duration=duration,
-                    resolution=resolution,
-                    aspect_ratio=aspect_ratio,
-                    audio=audio,
-                    quality=quality,
-                    negative_prompt=negative_prompt,
-                    seed=seed,
-                    include_extra_refs=False,
+                fallback_payload = (
+                    self._video_url_payload(
+                        **common,
+                        image_urls=(image_urls or [])[:1],
+                        video_url=video_url,
+                        audio_url=None,
+                        include_extra_refs=False,
+                    )
+                    if use_urls
+                    else self._video_b64_payload(
+                        **common,
+                        images_b64=(images_b64 or [])[:1],
+                        video_b64=video_b64,
+                        audio_b64=None,
+                        include_extra_refs=False,
+                    )
                 )
                 result = await self._request("POST", "/video/generations", timeout=900, json=fallback_payload)
                 result["_multiref_fallback"] = True
                 return result
             raise
 
-    def _video_payload(
+    def _base_payload(
         self,
         *,
         model: str,
         prompt: str,
-        image_urls: List[str],
-        video_url: Optional[str],
-        audio_url: Optional[str],
         duration: int,
         resolution: str,
         aspect_ratio: str,
@@ -186,7 +208,6 @@ class AIGateClient:
         quality: Optional[str],
         negative_prompt: Optional[str],
         seed: Optional[int],
-        include_extra_refs: bool,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": model,
@@ -206,18 +227,91 @@ class AIGateClient:
         if seed is not None:
             payload["seed"] = seed
 
+        return payload
+
+    def _video_url_payload(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        image_urls: List[str],
+        video_url: Optional[str],
+        audio_url: Optional[str],
+        duration: int,
+        resolution: str,
+        aspect_ratio: str,
+        audio: bool,
+        quality: Optional[str],
+        negative_prompt: Optional[str],
+        seed: Optional[int],
+        include_extra_refs: bool,
+    ) -> Dict[str, Any]:
+        payload = self._base_payload(
+            model=model,
+            prompt=prompt,
+            duration=duration,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+            audio=audio,
+            quality=quality,
+            negative_prompt=negative_prompt,
+            seed=seed,
+        )
+
         if image_urls:
-            payload["image_files"] = image_urls
+            payload["image_files"] = image_urls[:6]
             if include_extra_refs and len(image_urls) > 1:
                 payload.setdefault("provider_options", {})["input_images"] = image_urls[1:6]
 
         if video_url:
             payload["video_url"] = video_url
-            payload.setdefault("provider_options", {})["input_video"] = video_url
 
         if audio_url and include_extra_refs:
             payload["audio_url"] = audio_url
             payload.setdefault("provider_options", {})["audio_reference"] = audio_url
+
+        return payload
+
+    def _video_b64_payload(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        images_b64: List[str],
+        video_b64: Optional[str],
+        audio_b64: Optional[str],
+        duration: int,
+        resolution: str,
+        aspect_ratio: str,
+        audio: bool,
+        quality: Optional[str],
+        negative_prompt: Optional[str],
+        seed: Optional[int],
+        include_extra_refs: bool,
+    ) -> Dict[str, Any]:
+        payload = self._base_payload(
+            model=model,
+            prompt=prompt,
+            duration=duration,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+            audio=audio,
+            quality=quality,
+            negative_prompt=negative_prompt,
+            seed=seed,
+        )
+
+        if images_b64:
+            payload["input_image_b64"] = images_b64[0]
+            if include_extra_refs and len(images_b64) > 1:
+                payload.setdefault("provider_options", {})["input_images"] = images_b64[1:6]
+
+        if video_b64:
+            payload["input_video_b64"] = video_b64
+
+        if audio_b64 and include_extra_refs:
+            payload["input_audio_b64"] = audio_b64
+            payload.setdefault("provider_options", {})["audio_reference_b64"] = audio_b64
 
         return payload
 

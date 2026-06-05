@@ -8,7 +8,9 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import parse_qsl
@@ -25,10 +27,8 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-# Cloudinary credentials from environment
-CLOUDINARY_CLOUD_NAME = getattr(settings, 'CLOUDINARY_CLOUD_NAME', '') or ''
-CLOUDINARY_API_KEY = getattr(settings, 'CLOUDINARY_API_KEY', '') or ''
-CLOUDINARY_API_SECRET = getattr(settings, 'CLOUDINARY_API_SECRET', '') or ''
+def cloudinary_configured() -> bool:
+    return bool(settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET)
 
 
 def validate_telegram_init_data(init_data: str) -> Dict:
@@ -123,19 +123,40 @@ def form_files(form, key: str) -> List[UploadFile]:
     return [item for item in items if getattr(item, "filename", None)]
 
 
-async def upload_to_cloudinary(
+def normalize_reference_tags(prompt: str, image_count: int, has_video: bool, has_audio: bool) -> str:
+    prompt = re.sub(
+        r"@reference\s*(\d+)(?:\s*\[[^\]]+\])?",
+        lambda match: f"@Image{match.group(1)}",
+        prompt,
+        flags=re.IGNORECASE,
+    )
+    prompt = re.sub(r"@image\s*(\d+)", lambda match: f"@Image{match.group(1)}", prompt, flags=re.IGNORECASE)
+    prompt = re.sub(r"@video\s+reference(?:\s*\[[^\]]+\])?", "@Video1", prompt, flags=re.IGNORECASE)
+    prompt = re.sub(r"@audio\s+reference(?:\s*\[[^\]]+\])?", "@Audio1", prompt, flags=re.IGNORECASE)
+    prompt = re.sub(r"(@(?:Image|Video|Audio)\d+)\s*\[[^\]]+\]", r"\1", prompt, flags=re.IGNORECASE)
+
+    prefix_parts: List[str] = []
+    if image_count and not re.search(r"@Image\d+", prompt, flags=re.IGNORECASE):
+        image_tags = ", ".join(f"@Image{index}" for index in range(1, image_count + 1))
+        prefix_parts.append(f"Use {image_tags} as visual reference.")
+    if has_video and not re.search(r"@Video\d+", prompt, flags=re.IGNORECASE):
+        prefix_parts.append("Use @Video1 as motion/video reference.")
+    if has_audio and not re.search(r"@Audio\d+", prompt, flags=re.IGNORECASE):
+        prefix_parts.append("Use @Audio1 as audio/rhythm reference.")
+
+    if prefix_parts:
+        prompt = f"{' '.join(prefix_parts)} {prompt}"
+    return prompt
+
+
+async def upload_to_b64(
     files: Optional[List[UploadFile]],
     *,
     limit: int,
     expected_prefix: str,
     label: str,
-    resource_type: str = "image",
 ) -> List[str]:
-    """Upload files to Cloudinary and return direct URLs."""
-    if not CLOUDINARY_CLOUD_NAME or not CLOUDINARY_API_KEY or not CLOUDINARY_API_SECRET:
-        raise HTTPException(status_code=500, detail="Cloudinary credentials not configured")
-
-    urls: List[str] = []
+    encoded: List[str] = []
     max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
 
     for file in (files or [])[:limit]:
@@ -148,58 +169,144 @@ async def upload_to_cloudinary(
         if len(content) > max_bytes:
             raise HTTPException(status_code=400, detail=f"{label} больше {settings.MAX_UPLOAD_MB} MB")
 
-        # Generate signature for Cloudinary
-        timestamp = str(int(time.time()))
-        params = f"timestamp={timestamp}{CLOUDINARY_API_SECRET}"
-        signature = hashlib.sha1(params.encode()).hexdigest()
+        encoded.append(base64.b64encode(content).decode("utf-8"))
+        await file.seek(0)
 
-        upload_url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/{resource_type}/upload"
-
-        timeout = aiohttp.ClientTimeout(total=60)
-        data = aiohttp.FormData()
-        data.add_field("file", content, filename=file.filename, content_type=file.content_type or expected_prefix)
-        data.add_field("api_key", CLOUDINARY_API_KEY)
-        data.add_field("timestamp", timestamp)
-        data.add_field("signature", signature)
-
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(upload_url, data=data) as resp:
-                text = await resp.text()
-                if resp.status >= 400:
-                    raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {text}")
-                try:
-                    result = json.loads(text)
-                    url = result.get("secure_url", "").strip()
-                except json.JSONDecodeError:
-                    url = text.strip()
-                if not url.startswith("http"):
-                    raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {url}")
-                urls.append(url)
-
-    return urls
+    return encoded
 
 
-async def upload_one_to_cloudinary(
+async def upload_one_to_b64(
     file: Optional[UploadFile],
     *,
     expected_prefix: str,
     label: str,
-    resource_type: str = "image",
 ) -> Optional[str]:
-    values = await upload_to_cloudinary(
-        [file] if file else None,
-        limit=1,
-        expected_prefix=expected_prefix,
-        label=label,
-        resource_type=resource_type,
-    )
+    values = await upload_to_b64([file] if file else None, limit=1, expected_prefix=expected_prefix, label=label)
     return values[0] if values else None
+
+
+async def read_uploads(
+    files: Optional[List[UploadFile]],
+    *,
+    limit: int,
+    expected_prefix: str,
+    label: str,
+) -> List[Dict[str, str]]:
+    uploads: List[Dict[str, str]] = []
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+
+    for file in (files or [])[:limit]:
+        if not file or not file.filename:
+            continue
+        content_type = file.content_type or expected_prefix
+        if content_type and not content_type.startswith(expected_prefix):
+            raise HTTPException(status_code=400, detail=f"РќРµРІРµСЂРЅС‹Р№ С‚РёРї С„Р°Р№Р»Р°: {label}")
+
+        content = await file.read()
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=400, detail=f"{label} Р±РѕР»СЊС€Рµ {settings.MAX_UPLOAD_MB} MB")
+
+        uploads.append(
+            {
+                "filename": file.filename,
+                "content_type": content_type,
+                "content": content,
+                "b64": base64.b64encode(content).decode("utf-8"),
+            }
+        )
+
+    return uploads
+
+
+def cloudinary_signature(params: Dict[str, str]) -> str:
+    raw = "&".join(f"{key}={value}" for key, value in sorted(params.items()) if value)
+    return hashlib.sha1(f"{raw}{settings.CLOUDINARY_API_SECRET}".encode("utf-8")).hexdigest()
+
+
+async def verify_public_url(url: str) -> None:
+    timeout = aiohttp.ClientTimeout(total=20)
+    headers = {"User-Agent": "Mozilla/5.0", "Range": "bytes=0-0"}
+    last_status = ""
+    for _ in range(3):
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=headers) as response:
+                    if response.status < 400:
+                        return
+                    last_status = str(response.status)
+        except Exception as exc:
+            last_status = str(exc)
+        await asyncio.sleep(0.5)
+    raise HTTPException(status_code=500, detail=f"Cloudinary URL is not public: {last_status}")
+
+
+async def upload_refs_to_cloudinary(
+    uploads: List[Dict[str, str]],
+    *,
+    resource_type: str,
+    prefix: str,
+) -> List[str]:
+    if not uploads:
+        return []
+    if not cloudinary_configured():
+        raise HTTPException(status_code=500, detail="Cloudinary credentials are required for references")
+
+    urls: List[str] = []
+    timeout = aiohttp.ClientTimeout(total=90)
+    upload_url = f"https://api.cloudinary.com/v1_1/{settings.CLOUDINARY_CLOUD_NAME}/{resource_type}/upload"
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for upload in uploads:
+            public_id = f"aigate_refs/{prefix}_{int(time.time())}_{uuid.uuid4().hex[:12]}"
+            params = {"public_id": public_id, "timestamp": str(int(time.time()))}
+
+            data = aiohttp.FormData()
+            data.add_field(
+                "file",
+                upload["content"],
+                filename=f"{prefix}.bin",
+                content_type=upload["content_type"],
+            )
+            data.add_field("api_key", settings.CLOUDINARY_API_KEY)
+            data.add_field("public_id", params["public_id"])
+            data.add_field("timestamp", params["timestamp"])
+            data.add_field("signature", cloudinary_signature(params))
+
+            async with session.post(upload_url, data=data) as response:
+                text = await response.text()
+                if response.status >= 400:
+                    raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {text}")
+                try:
+                    result = json.loads(text)
+                except json.JSONDecodeError:
+                    raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {text}") from None
+
+            url = str(result.get("secure_url") or "").strip()
+            if not url.startswith("https://"):
+                raise HTTPException(status_code=500, detail="Cloudinary did not return a public https URL")
+            await verify_public_url(url)
+            urls.append(url)
+
+    return urls
+
+
+async def try_upload_refs_to_cloudinary(
+    uploads: List[Dict[str, str]],
+    *,
+    resource_type: str,
+    prefix: str,
+) -> List[str]:
+    try:
+        return await upload_refs_to_cloudinary(uploads, resource_type=resource_type, prefix=prefix)
+    except HTTPException as exc:
+        logger.warning("Cloudinary upload skipped for %s: %s", prefix, exc.detail)
+        return []
 
 
 def local_video_path(generation_id: int) -> Path:
     directory = Path(settings.MEDIA_DIR) / "generations"
     directory.mkdir(parents=True, exist_ok=True)
-    return directory / f"{generation_id}.mp4"
+    return directory / f"{generation_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
 
 
 def public_url(url: str) -> str:
@@ -400,27 +507,31 @@ async def api_generate(request: Request):
     if not model:
         raise HTTPException(status_code=500, detail=f"Model id for {model_mode} is not configured")
 
-    # Upload all references to Cloudinary
-    image_urls = await upload_to_cloudinary(
+    images_b64 = await upload_to_b64(
         image_files,
         limit=settings.MAX_IMAGE_REFERENCES,
         expected_prefix="image/",
         label="Фото-референс",
-        resource_type="image",
     )
-    video_url = await upload_one_to_cloudinary(
-        video_file,
-        expected_prefix="video/",
-        label="Видео-референс",
-        resource_type="video",
-    )
-    audio_url = await upload_one_to_cloudinary(
-        audio_file,
-        expected_prefix="audio/",
-        label="Аудио-референс",
-        resource_type="video",  # Cloudinary uses "video" for audio too
-    )
-    refs_count = len(image_urls) + (1 if video_url else 0) + (1 if audio_url else 0)
+    video_b64 = await upload_one_to_b64(video_file, expected_prefix="video/", label="Видео-референс")
+    audio_b64 = await upload_one_to_b64(audio_file, expected_prefix="audio/", label="Аудио-референс")
+    refs_count = len(images_b64) + (1 if video_b64 else 0) + (1 if audio_b64 else 0)
+
+    image_uploads = await read_uploads(image_files, limit=settings.MAX_IMAGE_REFERENCES, expected_prefix="image/", label="image reference")
+    video_uploads = await read_uploads([video_file] if video_file else None, limit=1, expected_prefix="video/", label="video reference")
+    audio_uploads = await read_uploads([audio_file] if audio_file else None, limit=1, expected_prefix="audio/", label="audio reference")
+
+    image_urls = await upload_refs_to_cloudinary(image_uploads, resource_type="image", prefix="image")
+    video_urls = await upload_refs_to_cloudinary(video_uploads, resource_type="video", prefix="video")
+    audio_urls = await upload_refs_to_cloudinary(audio_uploads, resource_type="video", prefix="audio")
+
+    images_b64 = [item["b64"] for item in image_uploads] or images_b64
+    video_b64 = video_uploads[0]["b64"] if video_uploads else video_b64
+    audio_b64 = audio_uploads[0]["b64"] if audio_uploads else audio_b64
+    video_url = video_urls[0] if video_urls else None
+    audio_url = audio_urls[0] if audio_urls else None
+    refs_count = len(images_b64) + (1 if video_b64 else 0) + (1 if audio_b64 else 0)
+    prompt = normalize_reference_tags(prompt, len(image_urls), bool(video_url), bool(audio_url))
 
     generation_id = await db.create_generation(
         user_db_id=user["id"],
@@ -446,8 +557,11 @@ async def api_generate(request: Request):
             prompt=prompt,
             negative_prompt=negative_prompt or None,
             image_urls=image_urls or None,
+            images_b64=images_b64,
             video_url=video_url,
+            video_b64=video_b64,
             audio_url=audio_url,
+            audio_b64=audio_b64,
             duration=duration,
             resolution=resolution,
             ratio=ratio,
@@ -475,9 +589,12 @@ async def run_generation(
     model: str,
     prompt: str,
     negative_prompt: Optional[str],
-    image_urls: List[str],
+    image_urls: Optional[List[str]],
+    images_b64: List[str],
     video_url: Optional[str],
+    video_b64: Optional[str],
     audio_url: Optional[str],
+    audio_b64: Optional[str],
     duration: int,
     resolution: str,
     ratio: str,
@@ -500,9 +617,12 @@ async def run_generation(
         result = await client.generate_video(
             model=model,
             prompt=prompt,
-            image_urls=image_urls or None,
+            image_urls=image_urls,
+            images_b64=images_b64 or None,
             video_url=video_url,
+            video_b64=video_b64,
             audio_url=audio_url,
+            audio_b64=audio_b64,
             duration=duration,
             resolution=resolution,
             aspect_ratio=ratio,
@@ -529,7 +649,7 @@ async def run_generation(
             video_bytes = await client.download_video_bytes(source_url)
             video_path = local_video_path(generation_id)
             await asyncio.to_thread(video_path.write_bytes, video_bytes)
-            result_url = f"/media/generations/{generation_id}.mp4"
+            result_url = f"/media/generations/{video_path.name}"
         except Exception as exc:
             await manager.send_progress(
                 telegram_id,
