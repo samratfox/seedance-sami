@@ -434,6 +434,102 @@ textarea:focus {
   cursor: pointer;
 }
 
+.asset-library-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.secondary-action.compact,
+.text-button.compact {
+  min-height: 36px;
+  margin: 0;
+  padding: 0 10px;
+}
+
+.asset-library {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #151411;
+}
+
+.asset-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.asset-filters button {
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.asset-filters button.active {
+  border-color: var(--teal);
+  color: var(--text);
+  background: #102522;
+}
+
+.asset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.asset-tile {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.asset-tile:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.asset-tile img,
+.asset-tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.asset-tile > span:not(.asset-audio-mark) {
+  position: absolute;
+  left: 5px;
+  bottom: 5px;
+  border-radius: 7px;
+  padding: 3px 6px;
+  background: rgba(0, 0, 0, 0.72);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.asset-audio-mark {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--amber);
+  font-weight: 760;
+}
+
 .file-summary {
   display: grid;
   gap: 8px;
@@ -442,6 +538,25 @@ textarea:focus {
   border-radius: 8px;
   padding: 10px;
   background: #151411;
+}
+
+.video-reference-mode {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #151411;
+}
+
+.video-reference-mode .control-group {
+  margin-top: 0;
+}
+
+.video-reference-mode small {
+  color: var(--muted);
+  line-height: 1.35;
 }
 
 .file-summary div {
@@ -480,6 +595,7 @@ textarea:focus {
   border-radius: 8px;
   background: #111;
   cursor: grab;
+  touch-action: none;
   user-select: none;
 }
 
@@ -594,6 +710,22 @@ textarea:focus {
 
 .compact-textarea {
   min-height: 74px;
+}
+
+.batch-prompts {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.section-title--compact {
+  margin-bottom: 0;
+}
+
+.batch-prompts-textarea {
+  min-height: 116px;
 }
 
 .launch-panel {
@@ -715,30 +847,40 @@ textarea:focus {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
-  align-items: center;
+  align-items: start;
   border-top: 1px solid var(--line);
   padding-top: 8px;
 }
 
-.recent-item div {
+.recent-main {
   display: grid;
   gap: 3px;
   min-width: 0;
 }
 
-.recent-item strong,
-.recent-item span {
+.recent-main strong,
+.recent-main span,
+.recent-main small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.recent-item span {
+.recent-main span,
+.recent-main small {
   color: var(--muted);
   font-size: 12px;
 }
 
-.recent-item a {
+.recent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.recent-item a,
+.recent-item button {
   display: grid;
   place-items: center;
   min-height: 36px;
@@ -748,6 +890,22 @@ textarea:focus {
   background: var(--panel-2);
   color: var(--text);
   text-decoration: none;
+  cursor: pointer;
+  text-align: center;
+  white-space: normal;
+}
+
+.recent-item button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.recent-empty {
+  margin: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  color: var(--muted);
+  line-height: 1.4;
 }
 
 .history-list {
@@ -891,6 +1049,19 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
+  .recent-item {
+    grid-template-columns: 1fr;
+  }
+
+  .recent-actions {
+    justify-content: stretch;
+  }
+
+  .recent-actions a,
+  .recent-actions button {
+    flex: 1 1 96px;
+  }
+
   .stage-overlay {
     left: 6px;
     right: 6px;
@@ -916,6 +1087,10 @@ textarea:focus {
 }
 .param-select:focus {
   border-color: var(--teal);
+}
+.param-select:disabled {
+  opacity: 0.72;
+  cursor: not-allowed;
 }
 .param-select option {
   background: var(--panel-2);

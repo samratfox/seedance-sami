@@ -39,6 +39,8 @@ class Database:
                     user_id INTEGER NOT NULL,
                     provider_job_id TEXT,
                     model TEXT,
+                    source_prompt TEXT,
+                    source_negative_prompt TEXT,
                     prompt TEXT NOT NULL,
                     negative_prompt TEXT,
                     image_paths TEXT,
@@ -47,6 +49,7 @@ class Database:
                     resolution TEXT DEFAULT "720p",
                     ratio TEXT DEFAULT "16:9",
                     quality TEXT DEFAULT "std",
+                    video_reference_mode TEXT DEFAULT "motion",
                     seed INTEGER,
                     with_audio INTEGER DEFAULT 0,
                     status TEXT DEFAULT "pending",
@@ -59,7 +62,25 @@ class Database:
                 )
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reference_assets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content_type TEXT,
+                    path TEXT NOT NULL,
+                    remote_url TEXT,
+                    size INTEGER DEFAULT 0,
+                    sha256 TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                )
+                """
+            )
             await self._ensure_generation_columns(db)
+            await self._ensure_reference_asset_columns(db)
             await db.commit()
 
     async def _ensure_generation_columns(self, db: aiosqlite.Connection):
@@ -68,14 +89,32 @@ class Database:
 
         columns = {
             "model": "TEXT",
+            "source_prompt": "TEXT",
+            "source_negative_prompt": "TEXT",
             "negative_prompt": "TEXT",
             "references_count": "INTEGER DEFAULT 0",
             "quality": "TEXT DEFAULT 'std'",
+            "video_reference_mode": "TEXT DEFAULT 'motion'",
             "seed": "INTEGER",
+            "reference_asset_ids": "TEXT",
         }
         for name, definition in columns.items():
             if name not in existing:
                 await db.execute(f"ALTER TABLE generations ADD COLUMN {name} {definition}")
+
+    async def _ensure_reference_asset_columns(self, db: aiosqlite.Connection):
+        async with db.execute("PRAGMA table_info(reference_assets)") as cursor:
+            existing = {row[1] for row in await cursor.fetchall()}
+
+        columns = {
+            "content_type": "TEXT",
+            "remote_url": "TEXT",
+            "size": "INTEGER DEFAULT 0",
+            "sha256": "TEXT",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                await db.execute(f"ALTER TABLE reference_assets ADD COLUMN {name} {definition}")
 
     async def get_user(self, telegram_id: int) -> Optional[Dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
@@ -102,6 +141,8 @@ class Database:
         *,
         user_db_id: int,
         model: str,
+        source_prompt: str,
+        source_negative_prompt: Optional[str],
         prompt: str,
         negative_prompt: Optional[str],
         image_paths: Optional[str],
@@ -110,20 +151,24 @@ class Database:
         resolution: str,
         ratio: str,
         quality: str,
+        video_reference_mode: str,
         seed: Optional[int],
+        reference_asset_ids: Optional[str],
         with_audio: bool,
     ) -> int:
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO generations (
-                    user_id, model, prompt, negative_prompt, image_paths, references_count,
-                    duration, resolution, ratio, quality, seed, with_audio, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    user_id, model, source_prompt, source_negative_prompt, prompt, negative_prompt, image_paths, references_count,
+                    duration, resolution, ratio, quality, video_reference_mode, seed, reference_asset_ids, with_audio, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_db_id,
                     model,
+                    source_prompt,
+                    source_negative_prompt,
                     prompt,
                     negative_prompt,
                     image_paths,
@@ -132,7 +177,9 @@ class Database:
                     resolution,
                     ratio,
                     quality,
+                    video_reference_mode,
                     seed,
+                    reference_asset_ids,
                     1 if with_audio else 0,
                     "pending",
                 ),
@@ -192,6 +239,84 @@ class Database:
                 (telegram_id, limit),
             ) as cursor:
                 return [dict(row) for row in await cursor.fetchall()]
+
+    async def create_reference_asset(
+        self,
+        *,
+        user_db_id: int,
+        kind: str,
+        filename: str,
+        content_type: Optional[str],
+        path: str,
+        remote_url: Optional[str],
+        size: int,
+        sha256: str,
+    ) -> int:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT id, remote_url FROM reference_assets
+                WHERE user_id = ? AND kind = ? AND sha256 = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (user_db_id, kind, sha256),
+            ) as cursor:
+                existing = await cursor.fetchone()
+                if existing:
+                    if remote_url and not existing["remote_url"]:
+                        await db.execute(
+                            "UPDATE reference_assets SET remote_url = ? WHERE id = ?",
+                            (remote_url, int(existing["id"])),
+                        )
+                        await db.commit()
+                    return int(existing["id"])
+
+            cursor = await db.execute(
+                """
+                INSERT INTO reference_assets (
+                    user_id, kind, filename, content_type, path, remote_url, size, sha256
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_db_id, kind, filename, content_type, path, remote_url, size, sha256),
+            )
+            await db.commit()
+            return int(cursor.lastrowid)
+
+    async def get_user_reference_assets(self, telegram_id: int, limit: int = 80) -> List[Dict[str, Any]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT a.*
+                FROM reference_assets a
+                JOIN users u ON a.user_id = u.id
+                WHERE u.telegram_id = ?
+                ORDER BY a.created_at DESC, a.id DESC
+                LIMIT ?
+                """,
+                (telegram_id, limit),
+            ) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_reference_assets_by_ids(self, user_db_id: int, asset_ids: List[int]) -> List[Dict[str, Any]]:
+        if not asset_ids:
+            return []
+        placeholders = ",".join("?" for _ in asset_ids)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"""
+                SELECT *
+                FROM reference_assets
+                WHERE user_id = ? AND id IN ({placeholders})
+                """,
+                (user_db_id, *asset_ids),
+            ) as cursor:
+                rows = [dict(row) for row in await cursor.fetchall()]
+        by_id = {int(row["id"]): row for row in rows}
+        return [by_id[asset_id] for asset_id in asset_ids if asset_id in by_id]
 
 
 db = Database()

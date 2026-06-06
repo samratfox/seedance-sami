@@ -320,7 +320,11 @@ class AIGateClient:
                 ]
 
         if video_url:
-            payload["input_video"] = video_url
+            # Seedance needs the motion-reference video in provider_options.reference_videos.
+            # Passing it as input_video triggers a video-to-video transform instead of
+            # reading the choreography/motion from the clip — which is never what we want here.
+            provider_options = payload.setdefault("provider_options", {})
+            provider_options["reference_videos"] = [video_url]
 
         if audio_url and include_extra_refs:
             payload["input_audio"] = audio_url
@@ -373,7 +377,10 @@ class AIGateClient:
                 ]
 
         if video_b64:
-            payload["input_video_b64"] = video_b64
+            # Same as the URL path: motion reference must go into provider_options.reference_videos.
+            # input_video_b64 causes video-to-video, not motion transfer from @Video1.
+            provider_options = payload.setdefault("provider_options", {})
+            provider_options["reference_videos_b64"] = [video_b64]
 
         if audio_b64 and include_extra_refs:
             payload["input_audio_b64"] = audio_b64

@@ -127,15 +127,49 @@ def form_files(form, key: str) -> List[UploadFile]:
     return [item for item in items if getattr(item, "filename", None)]
 
 
-def normalize_reference_mentions(prompt: str) -> str:
+def normalize_reference_mentions(
+    prompt: str,
+    *,
+    image_count: Optional[int] = None,
+    has_video: Optional[bool] = None,
+    has_audio: Optional[bool] = None,
+) -> str:
+    image_aliases: Dict[str, int] = {}
+
+    def image_alias_replacer(match: re.Match) -> str:
+        raw = match.group(1)
+        number = int(raw)
+        if image_count and 1 <= number <= image_count:
+            return f"@Image{number}"
+        if image_count:
+            if raw not in image_aliases:
+                next_index = len(image_aliases) + 1
+                image_aliases[raw] = min(next_index, image_count)
+            return f"@Image{image_aliases[raw]}"
+        return f"@Image{number}"
+
+    def video_alias_replacer(match: re.Match) -> str:
+        if has_video:
+            return "@Video1"
+        return f"@Video{int(match.group(1))}"
+
+    def audio_alias_replacer(match: re.Match) -> str:
+        if has_audio:
+            return "@Audio1"
+        return f"@Audio{int(match.group(1))}"
+
     prompt = re.sub(
         r"@reference\s*(\d+)(?:\s*\[[^\]]+\])?",
-        lambda match: f"@Image{match.group(1)}",
+        image_alias_replacer,
         prompt,
         flags=re.IGNORECASE,
     )
-    prompt = re.sub(r"@img\s*(\d+)", lambda match: f"@Image{match.group(1)}", prompt, flags=re.IGNORECASE)
-    prompt = re.sub(r"@image\s*(\d+)", lambda match: f"@Image{match.group(1)}", prompt, flags=re.IGNORECASE)
+    prompt = re.sub(r"@img[_\s-]*(\d+)", image_alias_replacer, prompt, flags=re.IGNORECASE)
+    prompt = re.sub(r"@image[_\s-]*(\d+)", image_alias_replacer, prompt, flags=re.IGNORECASE)
+    prompt = re.sub(r"@vid[_\s-]*(\d+)", video_alias_replacer, prompt, flags=re.IGNORECASE)
+    prompt = re.sub(r"@video[_\s-]*(\d+)", video_alias_replacer, prompt, flags=re.IGNORECASE)
+    prompt = re.sub(r"@aud[_\s-]*(\d+)", audio_alias_replacer, prompt, flags=re.IGNORECASE)
+    prompt = re.sub(r"@audio[_\s-]*(\d+)", audio_alias_replacer, prompt, flags=re.IGNORECASE)
     prompt = re.sub(r"@video\s+reference(?:\s*\[[^\]]+\])?", "@Video1", prompt, flags=re.IGNORECASE)
     prompt = re.sub(r"@audio\s+reference(?:\s*\[[^\]]+\])?", "@Audio1", prompt, flags=re.IGNORECASE)
     prompt = re.sub(r"(@(?:Image|Video|Audio)\d+)\s*\[[^\]]+\]", r"\1", prompt, flags=re.IGNORECASE)
@@ -149,8 +183,9 @@ def normalize_reference_tags(
     has_audio: bool,
     *,
     image_sheet: bool = False,
+    audio_from_video: bool = False,
 ) -> str:
-    prompt = normalize_reference_mentions(prompt)
+    prompt = normalize_reference_mentions(prompt, image_count=image_count, has_video=has_video, has_audio=has_audio)
 
     prefix_parts: List[str] = []
     if image_sheet:
@@ -173,7 +208,12 @@ def normalize_reference_tags(
         prefix_parts.append(f"Use {image_tags} as visual reference.")
     if has_video and not re.search(r"@Video\d+", prompt, flags=re.IGNORECASE):
         prefix_parts.append("Use @Video1 as motion/video reference.")
-    if has_audio and not re.search(r"@Audio\d+", prompt, flags=re.IGNORECASE):
+    if has_audio and audio_from_video:
+        prefix_parts.append(
+            "Use the attached audio reference extracted from the uploaded video for precise lip-sync and audio timing. "
+            "Do not invent a different voice, music, or soundtrack."
+        )
+    elif has_audio and not re.search(r"@Audio\d+", prompt, flags=re.IGNORECASE):
         prefix_parts.append("Use @Audio1 as audio/rhythm reference.")
 
     if prefix_parts:
@@ -181,15 +221,11 @@ def normalize_reference_tags(
     return prompt
 
 
-def rewrite_video_tags_to_audio(prompt: str) -> str:
-    return re.sub(r"@Video\d+", "@Audio1", prompt, flags=re.IGNORECASE)
-
-
 def instruction_image_indexes(prompt: str, image_count: int) -> List[int]:
     if image_count <= 0:
         return []
 
-    normalized = normalize_reference_mentions(prompt)
+    normalized = normalize_reference_mentions(prompt, image_count=image_count)
     patterns = [
         r"(?:instruction|instructions|prompt|script|text|rules|read|ocr|инструкц\w*|промпт\w*|текст\w*|прочит\w*)"
         r"(?:\s+from|\s+in|\s+on|\s+из|\s+с|\s+на|\s+по)?[^@]{0,60}@Image(\d+)",
@@ -507,8 +543,19 @@ def build_image_reference_sheet(uploads: List[Dict[str, str]]) -> Dict[str, str]
     }
 
 
-def visual_video_references_enabled() -> bool:
-    return settings.VIDEO_REFERENCE_MODE.strip().lower() in {"visual", "video", "direct"}
+def normalize_video_reference_mode(value: str) -> str:
+    normalized = (value or settings.VIDEO_REFERENCE_MODE or "motion").strip().lower()
+    if normalized in {"motion", "movement", "visual", "video", "direct"}:
+        return "motion"
+    if normalized in {"lipsync", "lip_sync", "lip-sync", "audio", "voice"}:
+        return "lipsync"
+    if normalized in {"motion_lipsync", "motion-lipsync", "motion+lip-sync", "motion+audio", "both", "clip"}:
+        return "motion_lipsync"
+    raise HTTPException(status_code=400, detail=f"Unsupported video_reference_mode: {value}")
+
+
+def visual_video_references_enabled(video_reference_mode: str) -> bool:
+    return normalize_video_reference_mode(video_reference_mode) in {"motion", "motion_lipsync"}
 
 
 async def extract_audio_from_video_upload(upload: Dict[str, str]) -> Optional[Dict[str, str]]:
@@ -657,6 +704,82 @@ def local_video_path(generation_id: int) -> Path:
     return directory / f"{generation_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
 
 
+def asset_url(path: str) -> str:
+    path = str(path or "").replace("\\", "/").lstrip("/")
+    return f"/media/{path}"
+
+
+def serialize_reference_asset(item: Dict) -> Dict:
+    return {
+        "id": item["id"],
+        "kind": item["kind"],
+        "filename": item["filename"],
+        "content_type": item.get("content_type"),
+        "size": item.get("size") or 0,
+        "url": item.get("remote_url") or asset_url(item["path"]),
+        "created_at": item["created_at"],
+    }
+
+
+def upload_suffix(upload: Dict[str, str]) -> str:
+    filename = upload.get("filename") or ""
+    suffix = Path(filename).suffix.lower()
+    if suffix:
+        return suffix[:12]
+    content_type = (upload.get("content_type") or "").lower()
+    if content_type == "image/jpeg":
+        return ".jpg"
+    if content_type == "image/png":
+        return ".png"
+    if content_type == "image/webp":
+        return ".webp"
+    if content_type == "video/mp4":
+        return ".mp4"
+    if content_type in {"audio/mpeg", "audio/mp3"}:
+        return ".mp3"
+    if content_type == "audio/wav":
+        return ".wav"
+    return ".bin"
+
+
+async def save_reference_assets(user_db_id: int, uploads: List[Dict[str, str]], kind: str) -> List[int]:
+    if not uploads:
+        return []
+
+    directory = Path(settings.MEDIA_DIR) / "reference_assets" / str(user_db_id) / kind
+    directory.mkdir(parents=True, exist_ok=True)
+
+    resource_type = "image" if kind == "image" else "video"
+    remote_urls = await try_upload_refs_to_cloudinary(uploads, resource_type=resource_type, prefix=f"library_{kind}")
+
+    asset_ids: List[int] = []
+    for index, upload in enumerate(uploads):
+        content = upload.get("content") or b""
+        if not content:
+            continue
+
+        digest = hashlib.sha256(content).hexdigest()
+        filename = upload.get("filename") or f"{kind}_reference{upload_suffix(upload)}"
+        stored_name = f"{uuid.uuid4().hex}{upload_suffix(upload)}"
+        stored_path = directory / stored_name
+        await asyncio.to_thread(stored_path.write_bytes, content)
+
+        relative_path = stored_path.relative_to(Path(settings.MEDIA_DIR)).as_posix()
+        asset_id = await db.create_reference_asset(
+            user_db_id=user_db_id,
+            kind=kind,
+            filename=filename,
+            content_type=upload.get("content_type"),
+            path=relative_path,
+            remote_url=remote_urls[index] if index < len(remote_urls) else None,
+            size=len(content),
+            sha256=digest,
+        )
+        asset_ids.append(asset_id)
+
+    return asset_ids
+
+
 def public_url(url: str) -> str:
     if not url:
         return ""
@@ -784,6 +907,9 @@ async def api_config():
         "max_upload_mb": settings.MAX_UPLOAD_MB,
         "max_prompt_length": settings.MAX_PROMPT_LENGTH,
         "max_generation_prompt_length": settings.MAX_GENERATION_PROMPT_LENGTH,
+        "max_reference_assets": settings.MAX_REFERENCE_ASSETS,
+        "video_reference_modes": ["motion", "lipsync", "motion_lipsync"],
+        "default_video_reference_mode": normalize_video_reference_mode(settings.VIDEO_REFERENCE_MODE),
     }
 
 
@@ -820,6 +946,16 @@ async def api_models(init_data: str = Form(...)):
         return {"models": [], "error": str(exc)}
 
 
+@router.post("/api/reference-assets")
+async def api_reference_assets(init_data: str = Form(...), limit: int = Form(80)):
+    user = await get_or_create_user(init_data)
+    limit = max(1, min(int(limit), settings.MAX_REFERENCE_ASSETS))
+    assets = await db.get_user_reference_assets(int(user["telegram_id"]), limit=limit)
+    return {
+        "assets": [serialize_reference_asset(item) for item in assets]
+    }
+
+
 @router.post("/api/generate")
 async def api_generate(request: Request):
     form = await request.form()
@@ -830,6 +966,7 @@ async def api_generate(request: Request):
     resolution = form_text(form, "resolution", "720p")
     ratio = form_text(form, "ratio", "16:9")
     audio = form_bool(form, "audio", False)
+    video_reference_mode = normalize_video_reference_mode(form_text(form, "video_reference_mode", settings.VIDEO_REFERENCE_MODE))
     negative_prompt = form_text(form, "negative_prompt")
     seed = form_optional_int(form, "seed")
     image_files = form_files(form, "image_files")
@@ -840,8 +977,10 @@ async def api_generate(request: Request):
     if not user.get("api_key"):
         raise HTTPException(status_code=400, detail="Сначала подключите API-ключ AIGate")
 
-    prompt = prompt.strip()
-    negative_prompt = negative_prompt.strip()
+    source_prompt = prompt.strip()
+    source_negative_prompt = negative_prompt.strip()
+    prompt = source_prompt
+    negative_prompt = source_negative_prompt
     if not prompt:
         raise HTTPException(status_code=400, detail="Промпт не может быть пустым")
     if len(prompt) > settings.MAX_PROMPT_LENGTH:
@@ -870,6 +1009,10 @@ async def api_generate(request: Request):
     image_uploads = await read_uploads(image_files, limit=settings.MAX_IMAGE_REFERENCES, expected_prefix="image/", label="image reference")
     video_uploads = await read_uploads([video_file] if video_file else None, limit=1, expected_prefix="video/", label="video reference")
     audio_uploads = await read_uploads([audio_file] if audio_file else None, limit=1, expected_prefix="audio/", label="audio reference")
+    image_asset_ids = await save_reference_assets(user["id"], image_uploads, "image")
+    video_asset_ids = await save_reference_assets(user["id"], video_uploads, "video")
+    audio_asset_ids = await save_reference_assets(user["id"], audio_uploads, "audio")
+    reference_asset_ids = image_asset_ids + video_asset_ids + audio_asset_ids
 
     source_image_count = len(image_uploads)
     instruction_indexes = instruction_image_indexes(prompt, source_image_count)
@@ -889,22 +1032,38 @@ async def api_generate(request: Request):
     use_image_sheet = image_reference_sheet_enabled()
     prepared_image_uploads = prepare_image_reference_uploads(image_uploads, ratio)
     image_payload_uploads = build_image_reference_uploads(prepared_image_uploads) if use_image_sheet else prepared_image_uploads
-    use_visual_video = visual_video_references_enabled()
+    use_visual_video = visual_video_references_enabled(video_reference_mode)
     video_payload_uploads = video_uploads if use_visual_video else []
+    should_extract_video_audio = video_reference_mode in {"lipsync", "motion_lipsync"}
 
     extracted_audio_upload = None
-    if video_uploads and settings.EXTRACT_AUDIO_FROM_VIDEO:
+    audio_from_video = False
+    if video_uploads and should_extract_video_audio and settings.EXTRACT_AUDIO_FROM_VIDEO:
         extracted_audio_upload = await extract_audio_from_video_upload(video_uploads[0])
         if extracted_audio_upload and not audio_uploads:
             audio_uploads = [extracted_audio_upload]
+            audio_from_video = True
         elif not extracted_audio_upload and not audio_uploads and not use_visual_video:
             raise HTTPException(
                 status_code=400,
-                detail="Не удалось извлечь аудио из видео-референса. Загрузите аудио отдельно или включите VIDEO_REFERENCE_MODE=visual.",
+                detail="Не удалось извлечь аудио из видео-референса. Переключите видео-референс в режим движения или загрузите аудио отдельно.",
             )
 
-    if video_uploads and not use_visual_video and audio_uploads:
-        prompt = rewrite_video_tags_to_audio(prompt)
+    if audio_from_video:
+        audio = True
+
+    if video_uploads and video_reference_mode == "lipsync" and audio_from_video:
+        prompt = (
+            f"{prompt}\n\n"
+            "Use the audio extracted from the uploaded video as the lip-sync source. "
+            "Ignore the uploaded video's visual frames; do not use them as motion reference."
+        )
+    elif video_uploads and video_reference_mode == "motion_lipsync" and audio_uploads:
+        prompt = (
+            f"{prompt}\n\n"
+            "Use @Video1 as motion/camera/choreography reference. "
+            "Use the audio extracted from that same uploaded video as the lip-sync source."
+        )
 
     image_urls = await try_upload_refs_to_cloudinary(image_payload_uploads, resource_type="image", prefix="image")
     video_urls = await try_upload_refs_to_cloudinary(video_payload_uploads, resource_type="video", prefix="video")
@@ -922,6 +1081,7 @@ async def api_generate(request: Request):
         bool(video_url or video_b64),
         bool(audio_url or audio_b64),
         image_sheet=use_image_sheet and source_image_count > 1,
+        audio_from_video=audio_from_video,
     )
     prompt = add_ocr_instruction_text(prompt, ocr_instruction_texts)
     prompt = add_negative_constraints_to_prompt(prompt, negative_prompt)
@@ -956,6 +1116,8 @@ async def api_generate(request: Request):
     generation_id = await db.create_generation(
         user_db_id=user["id"],
         model=model,
+        source_prompt=source_prompt,
+        source_negative_prompt=source_negative_prompt or None,
         prompt=prompt,
         negative_prompt=negative_prompt or None,
         image_paths="uploaded" if refs_count else None,
@@ -964,7 +1126,9 @@ async def api_generate(request: Request):
         resolution=resolution,
         ratio=ratio,
         quality=model_mode,
+        video_reference_mode=video_reference_mode,
         seed=seed,
+        reference_asset_ids=json.dumps(reference_asset_ids) if reference_asset_ids else None,
         with_audio=audio,
     )
 
@@ -998,6 +1162,7 @@ async def api_generate(request: Request):
         "model_mode": model_mode,
         "model": model,
         "estimated_cost": estimate_cost(model_mode, resolution, duration, with_references=bool(refs_count)),
+        "video_reference_mode": video_reference_mode,
     }
 
 
@@ -1144,6 +1309,18 @@ async def api_history(init_data: str = Form(...), limit: int = Form(12)):
     user = await get_or_create_user(init_data)
     limit = max(1, min(int(limit), 50))
     generations = await db.get_user_generations(int(user["telegram_id"]), limit=limit)
+    for generation in generations:
+        raw_asset_ids = generation.get("reference_asset_ids")
+        asset_ids: List[int] = []
+        try:
+            loaded_ids = json.loads(raw_asset_ids or "[]")
+            if isinstance(loaded_ids, list):
+                asset_ids = [int(asset_id) for asset_id in loaded_ids if str(asset_id).isdigit()]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            asset_ids = []
+
+        assets = await db.get_reference_assets_by_ids(int(user["id"]), asset_ids)
+        generation["reference_assets"] = [serialize_reference_asset(item) for item in assets]
     return {"generations": generations}
 
 

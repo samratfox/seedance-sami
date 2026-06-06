@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     MAX_GENERATION_PROMPT_LENGTH: int = 12000
     MAX_UPLOAD_MB: int = 16
     MAX_IMAGE_REFERENCES: int = 6
+    MAX_REFERENCE_ASSETS: int = 80
 
     WEBAPP_HOST: str = "0.0.0.0"
     WEBAPP_PORT: int = Field(default_factory=lambda: int(os.getenv("PORT", "8080")))
@@ -31,7 +32,7 @@ class Settings(BaseSettings):
     CLOUDINARY_API_KEY: str = ""
     CLOUDINARY_API_SECRET: str = ""
     EXTRACT_AUDIO_FROM_VIDEO: bool = True
-    VIDEO_REFERENCE_MODE: str = "audio"
+    VIDEO_REFERENCE_MODE: str = "motion"
     MULTI_IMAGE_REFERENCE_MODE: str = "separate"
     STRICT_MULTI_IMAGE_REFERENCES: bool = True
     ENABLE_IMAGE_OCR: bool = True

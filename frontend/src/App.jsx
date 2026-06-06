@@ -7,6 +7,7 @@ import {
   fetchBalance,
   fetchConfig,
   fetchHistory,
+  fetchReferenceAssets,
   isTelegramReady,
   setApiKey,
   submitGeneration,
@@ -54,6 +55,8 @@ const DEFAULT_CONFIG = {
   max_image_references: 6,
   max_upload_mb: 16,
   max_prompt_length: 3500,
+  video_reference_modes: ["motion", "lipsync", "motion_lipsync"],
+  default_video_reference_mode: "motion",
 };
 
 const CAMERA_PRESETS = [
@@ -103,6 +106,14 @@ function money(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return "по тарифу AIGate";
   return `$${numeric.toFixed(5)} / sec`;
+}
+
+function splitPromptBatch(value) {
+  return (value || "")
+    .split(/\n\s*---+\s*\n/g)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 10);
 }
 
 // ─── @-mention helpers ───────────────────────────────────────────────────────
@@ -294,6 +305,11 @@ export default function App() {
   const [balance, setBalance] = useState("");
   const [balanceRaw, setBalanceRaw] = useState(null);
   const [history, setHistory] = useState([]);
+  const [referenceAssets, setReferenceAssets] = useState([]);
+  const [assetLibraryOpen, setAssetLibraryOpen] = useState(false);
+  const [assetFilter, setAssetFilter] = useState("all");
+  const [addingAssetId, setAddingAssetId] = useState(null);
+  const [restoringHistoryId, setRestoringHistoryId] = useState(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [booting, setBooting] = useState(true);
@@ -301,11 +317,14 @@ export default function App() {
 
   const [modelMode, setModelMode] = useState("fast");
   const [prompt, setPrompt] = useState("");
+  const [queuePromptsText, setQueuePromptsText] = useState("");
   const [negativePrompt, setNegativePrompt] = useState("");
   const [duration, setDuration] = useState(5);
+  const [queueCount, setQueueCount] = useState(1);
   const [resolution, setResolution] = useState("720p");
   const [ratio, setRatio] = useState("16:9");
   const [audio, setAudio] = useState(false);
+  const [videoReferenceMode, setVideoReferenceMode] = useState("motion");
   const [seed, setSeed] = useState("");
   const [imageFiles, setImageFiles] = useState([]);
   const [imagePreviews, setImagePreviews] = useState([]);
@@ -333,6 +352,13 @@ export default function App() {
     if (!perSecond) return null;
     return duration * perSecond;
   }, [activePricing, duration, resolution]);
+  const queuePromptItems = useMemo(() => splitPromptBatch(queuePromptsText), [queuePromptsText]);
+  const effectiveQueueCount = queuePromptItems.length || queueCount;
+  const totalEstimatedCost = estimatedCost ? estimatedCost * effectiveQueueCount : null;
+  const filteredReferenceAssets = useMemo(() => {
+    if (assetFilter === "all") return referenceAssets;
+    return referenceAssets.filter((asset) => asset.kind === assetFilter);
+  }, [assetFilter, referenceAssets]);
 
   const shownProgress = useMemo(() => {
     if (!generation) return 0;
@@ -349,6 +375,12 @@ export default function App() {
     const payload = await fetchHistory(8);
     setHistory(payload.generations || []);
   }, []);
+
+  const loadReferenceAssets = useCallback(async () => {
+    if (!isTelegramReady()) return;
+    const payload = await fetchReferenceAssets(config.max_reference_assets || 80);
+    setReferenceAssets(payload.assets || []);
+  }, [config.max_reference_assets]);
 
   const loadBalance = useCallback(async () => {
     if (!isTelegramReady()) {
@@ -379,10 +411,14 @@ export default function App() {
         setConfig(merged);
         setModelMode((current) => (merged.qualities.includes(current) ? current : merged.qualities[0] || "fast"));
         setDuration((current) => (merged.durations.includes(current) ? current : merged.durations[0] || 5));
+        setVideoReferenceMode((current) =>
+          merged.video_reference_modes?.includes(current) ? current : merged.default_video_reference_mode || "motion"
+        );
       })
       .catch(() => setConfig(DEFAULT_CONFIG));
     loadBalance();
     loadHistory().catch(() => {});
+    loadReferenceAssets().catch(() => {});
     const socket = connectWebSocket((message) => {
       setGeneration((current) => ({
         id: message.generation_id,
@@ -394,11 +430,12 @@ export default function App() {
       if (message.status === "completed" || message.status === "failed") {
         setSubmitting(false);
         loadHistory().catch(() => {});
+        loadReferenceAssets().catch(() => {});
         loadBalance().catch(() => {});
       }
     });
     return () => socket?.close();
-  }, [loadBalance, loadHistory, tg]);
+  }, [loadBalance, loadHistory, loadReferenceAssets, tg]);
 
   useEffect(() => {
     if (!submitting && generation?.status !== "processing") return;
@@ -458,6 +495,100 @@ export default function App() {
     if (images.length) setImageFiles((current) => [...current, ...images].slice(0, config.max_image_references));
     if (video) setVideoFile(video);
     if (audioRef) setAudioFile(audioRef);
+  }
+
+  async function fileFromAsset(asset) {
+    const response = await fetch(absoluteUrl(asset.url));
+    if (!response.ok) throw new Error("Не удалось загрузить референс из библиотеки");
+    const blob = await response.blob();
+    return new File([blob], asset.filename || `${asset.kind}-reference`, {
+      type: asset.content_type || blob.type || "application/octet-stream",
+    });
+  }
+
+  async function addAssetReference(asset) {
+    setError("");
+    setNotice("");
+    setAddingAssetId(asset.id);
+    try {
+      const file = await fileFromAsset(asset);
+      if (asset.kind === "image") {
+        setImageFiles((current) => [...current, file].slice(0, config.max_image_references));
+      } else if (asset.kind === "video") {
+        setVideoFile(file);
+      } else if (asset.kind === "audio") {
+        setAudioFile(file);
+      }
+      setNotice("Референс добавлен в текущую генерацию.");
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setAddingAssetId(null);
+    }
+  }
+
+  async function applyHistoryReferences(item) {
+    const assets = Array.isArray(item.reference_assets) ? item.reference_assets : [];
+    if (!assets.length) {
+      setImageFiles([]);
+      setVideoFile(null);
+      setAudioFile(null);
+      return 0;
+    }
+
+    const loadedAssets = await Promise.all(
+      assets.map(async (asset) => ({
+        asset,
+        file: await fileFromAsset(asset),
+      }))
+    );
+    const images = loadedAssets
+      .filter(({ asset }) => asset.kind === "image")
+      .map(({ file }) => file)
+      .slice(0, config.max_image_references);
+    const video = loadedAssets.find(({ asset }) => asset.kind === "video")?.file || null;
+    const audioRef = loadedAssets.find(({ asset }) => asset.kind === "audio")?.file || null;
+
+    setImageFiles(images);
+    setVideoFile(video);
+    setAudioFile(audioRef);
+    return loadedAssets.length;
+  }
+
+  async function applyHistorySettings(item, includeRefs = false) {
+    setError("");
+    setNotice("");
+    setAddingAssetId(null);
+    setRestoringHistoryId(includeRefs ? item.id : null);
+    setModelMode(item.quality || "fast");
+    setPrompt(item.source_prompt || item.prompt || "");
+    setNegativePrompt(item.source_negative_prompt || item.negative_prompt || "");
+    setDuration(Number(item.duration || 5));
+    setResolution(item.resolution || "720p");
+    setRatio(item.ratio || "16:9");
+    setAudio(Boolean(item.with_audio));
+    setVideoReferenceMode(item.video_reference_mode || "motion");
+    setSeed(item.seed ? String(item.seed) : "");
+    setQueueCount(1);
+    setQueuePromptsText("");
+    setPage("generate");
+    if (includeRefs) {
+      try {
+        const restoredCount = await applyHistoryReferences(item);
+        setNotice(
+          restoredCount
+            ? "Промпт, настройки и референсы применены."
+            : "Промпт и настройки применены. У этой генерации нет сохранённых референсов."
+        );
+      } catch (caught) {
+        setError(errorMessage(caught));
+      } finally {
+        setRestoringHistoryId(null);
+      }
+      return;
+    }
+    setRestoringHistoryId(null);
+    setNotice("Настройки прошлой генерации применены.");
   }
 
   function hasDraggedFiles(event) {
@@ -550,11 +681,44 @@ export default function App() {
     setImageDropIndex(null);
   }
 
+  function handleImagePointerDown(event, index) {
+    if (event.pointerType === "mouse" || event.target.closest("button")) return;
+    event.preventDefault();
+    setDraggedImageIndex(index);
+    setImageDropIndex(index);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function handleImagePointerMove(event) {
+    if (event.pointerType === "mouse" || draggedImageIndex === null) return;
+    event.preventDefault();
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest?.(".reference-tile");
+    const rawIndex = target?.dataset?.index;
+    if (rawIndex !== undefined) setImageDropIndex(Number(rawIndex));
+  }
+
+  function finishImagePointerDrag(event) {
+    if (event.pointerType === "mouse") return;
+    event.preventDefault();
+    if (draggedImageIndex !== null && imageDropIndex !== null) {
+      reorderImage(draggedImageIndex, imageDropIndex);
+    }
+    setDraggedImageIndex(null);
+    setImageDropIndex(null);
+  }
+
   function appendToPrompt(text) {
     setPrompt((current) => {
       const sep = current && !current.endsWith(" ") ? " " : "";
       return current + sep + text + " ";
     });
+  }
+
+  function selectVideoReferenceMode(mode) {
+    setVideoReferenceMode(mode);
+    if (mode === "lipsync" || mode === "motion_lipsync") {
+      setAudio(true);
+    }
   }
 
   async function handleGenerate() {
@@ -565,16 +729,45 @@ export default function App() {
       return;
     }
     if (!hasKey) { setPage("profile"); setError("Сначала подключите API-ключ AIGate."); return; }
-    if (!prompt.trim()) { setError("Введите промпт для видео."); return; }
+    const batchPrompts = queuePromptItems.length ? queuePromptItems : [];
+    if (!prompt.trim() && !batchPrompts.length) { setError("Введите промпт для видео."); return; }
     if (modeUnavailable) { setError("Выбранный режим недоступен с референсами. Выберите другой режим или уберите референсы."); return; }
     setSubmitting(true);
     setGenerationStartedAt(Date.now());
     setNow(Date.now());
-    setGeneration({ id: null, status: "processing", message: "Отправляем задачу на backend.", progress: 8, resultUrl: "" });
+    setGeneration({ id: null, status: "processing", message: "Отправляем видео на backend.", progress: 8, resultUrl: "" });
     try {
-      const payload = await submitGeneration({ modelMode, prompt: prompt.trim(), duration, resolution, ratio, audio, negativePrompt, seed, imageFiles, videoFile, audioFile });
-      setGeneration((current) => ({ ...current, id: payload.generation_id, message: `Задача #${payload.generation_id} запущена. Оставьте окно открытым.`, progress: 14 }));
-      setNotice("Генерация запущена.");
+      const promptsToSubmit = batchPrompts.length
+        ? batchPrompts
+        : Array.from({ length: Math.max(1, Math.min(10, Number(queueCount) || 1)) }, () => prompt.trim());
+      const count = promptsToSubmit.length;
+      const startedIds = [];
+
+      for (let index = 1; index <= count; index += 1) {
+        const promptForVideo = promptsToSubmit[index - 1];
+        setGeneration((current) => ({
+          ...current,
+          message: count > 1 ? `Очередь: запускаем видео ${index}/${count}.` : current?.message,
+          progress: count > 1 ? Math.max(8, Math.round(((index - 1) / count) * 22)) : current?.progress || 8,
+        }));
+        const payload = await submitGeneration({ modelMode, prompt: promptForVideo, duration, resolution, ratio, audio, videoReferenceMode, negativePrompt, seed, imageFiles, videoFile, audioFile });
+        startedIds.push(payload.generation_id);
+        setGeneration((current) => ({
+          ...current,
+          id: payload.generation_id,
+          message: count > 1
+            ? `Очередь: запущено видео ${index}/${count}. Последнее видео #${payload.generation_id}.`
+            : `Задача #${payload.generation_id} запущена. Оставьте окно открытым.`,
+          progress: count > 1 ? Math.round((index / count) * 28) : 14,
+        }));
+      }
+
+      setNotice(count > 1 ? `Очередь запущена: ${startedIds.length}/${count} видео.` : "Генерация запущена.");
+      if (count > 1) {
+        setSubmitting(false);
+        loadHistory().catch(() => {});
+        loadReferenceAssets().catch(() => {});
+      }
     } catch (caught) {
       setSubmitting(false);
       const message = errorMessage(caught);
@@ -714,17 +907,72 @@ export default function App() {
               <span>Добавить фото-референсы</span>
               <small>до {config.max_image_references} фото; видео и аудио можно перетащить сюда</small>
             </button>
+            <div className="asset-library-head">
+              <button type="button" className="secondary-action compact" onClick={() => setAssetLibraryOpen((value) => !value)}>
+                {assetLibraryOpen ? "Скрыть библиотеку" : "Библиотека референсов"}
+              </button>
+              <button type="button" className="text-button compact" onClick={() => loadReferenceAssets().catch(() => {})}>
+                Обновить
+              </button>
+            </div>
+            {assetLibraryOpen && (
+              <div className="asset-library">
+                <div className="asset-filters">
+                  {[
+                    ["all", "Все"],
+                    ["image", "Фото"],
+                    ["video", "Видео"],
+                    ["audio", "Аудио"],
+                  ].map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      className={assetFilter === key ? "active" : ""}
+                      onClick={() => setAssetFilter(key)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {filteredReferenceAssets.length > 0 ? (
+                  <div className="asset-grid">
+                    {filteredReferenceAssets.slice(0, 24).map((asset) => (
+                      <button
+                        type="button"
+                        className="asset-tile"
+                        key={asset.id}
+                        onClick={() => addAssetReference(asset)}
+                        disabled={addingAssetId === asset.id}
+                        title={asset.filename}
+                      >
+                        {asset.kind === "image" && <img src={absoluteUrl(asset.url)} alt={asset.filename} />}
+                        {asset.kind === "video" && <video src={absoluteUrl(asset.url)} muted playsInline />}
+                        {asset.kind === "audio" && <span className="asset-audio-mark">Audio</span>}
+                        <span>{asset.kind}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="history-placeholder">Пока нет сохранённых референсов.</div>
+                )}
+              </div>
+            )}
             {imagePreviews.length > 0 && (
               <div className="reference-grid">
                 {imagePreviews.map((item, index) => (
                   <div
                     className={`reference-tile ${draggedImageIndex === index ? "is-dragging" : ""} ${imageDropIndex === index && draggedImageIndex !== null ? "drop-target" : ""}`}
                     key={item.url}
+                    data-index={index}
                     draggable
                     onDragStart={(event) => handleImageDragStart(event, index)}
                     onDragOver={(event) => handleImageDragOver(event, index)}
                     onDrop={(event) => handleImageDrop(event, index)}
                     onDragEnd={handleImageDragEnd}
+                    onPointerDown={(event) => handleImagePointerDown(event, index)}
+                    onPointerMove={handleImagePointerMove}
+                    onPointerUp={finishImagePointerDrag}
+                    onPointerCancel={handleImageDragEnd}
                   >
                     <img src={item.url} alt={`Фото ${index + 1}`} />
                     <span className="reference-badge">Image{index + 1}</span>
@@ -747,6 +995,22 @@ export default function App() {
                 {audioFile ? "Аудио выбрано" : "Добавить аудио-референс"}
               </button>
             </div>
+            {videoFile && (
+              <div className="video-reference-mode">
+                <ControlGroup label="Режим видео-референса">
+                  <Segment active={videoReferenceMode === "motion"} onClick={() => selectVideoReferenceMode("motion")}>Движение</Segment>
+                  <Segment active={videoReferenceMode === "lipsync"} onClick={() => selectVideoReferenceMode("lipsync")}>Липсинк</Segment>
+                  <Segment active={videoReferenceMode === "motion_lipsync"} onClick={() => selectVideoReferenceMode("motion_lipsync")}>Движение+липсинк</Segment>
+                </ControlGroup>
+                <small>
+                  {videoReferenceMode === "motion"
+                    ? "Берём движение, ритм, камеру и хореографию из @Video1."
+                    : videoReferenceMode === "motion_lipsync"
+                      ? "Берём движение из @Video1 и звук из этого же видео для липсинка."
+                      : "Вытаскиваем звук из видео через ffmpeg и используем его для липсинка."}
+                </small>
+              </div>
+            )}
             {(videoFile || audioFile) && (
               <div className="file-summary">
                 {videoFile && (
@@ -809,6 +1073,18 @@ export default function App() {
                 )}
               </div>
             )}
+            <div className="batch-prompts">
+              <div className="section-title section-title--compact">
+                <span>Промпты потока</span>
+                <small>{queuePromptItems.length ? `${queuePromptItems.length}/10 видео` : "один промпт"}</small>
+              </div>
+              <textarea
+                className="compact-textarea batch-prompts-textarea"
+                value={queuePromptsText}
+                onChange={(event) => setQueuePromptsText(event.target.value)}
+                placeholder={"Prompt for video 1\n---\nPrompt for video 2"}
+              />
+            </div>
             {/* Camera presets */}
             <CameraPresets onSelect={(preset) => appendToPrompt(preset)} />
           </section>
@@ -830,6 +1106,20 @@ export default function App() {
               >
                 {config.durations.map((d) => (
                   <option key={d} value={d}>{d} секунд</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="control-group">
+              <div className="control-label">Очередь</div>
+              <select
+                className="param-select"
+                value={queuePromptItems.length || queueCount}
+                onChange={(e) => setQueueCount(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
+                disabled={queuePromptItems.length > 0}
+              >
+                {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
+                  <option key={count} value={count}>{count} видео</option>
                 ))}
               </select>
             </div>
@@ -886,11 +1176,15 @@ export default function App() {
           <section className="launch-panel">
             <div>
               <strong>{activeMode.label} / {duration} c / {resolution} / {ratio}</strong>
+              {effectiveQueueCount > 1 && <span>Очередь: {effectiveQueueCount} видео</span>}
+              {queuePromptItems.length > 0 && <span>Промпты: разные для каждого видео</span>}
+              {videoFile && <span>Видео-режим: {videoReferenceMode === "motion" ? "движение/камера" : videoReferenceMode === "motion_lipsync" ? "движение+липсинк" : "липсинк/аудио"}</span>}
               <span>{imageFiles.length} фото, {videoFile ? "1 видео" : "без видео"}, {audioFile ? "1 аудио" : "без аудио"}</span>
-              <span>{estimatedCost ? `Ориентир: $${estimatedCost.toFixed(4)}` : "Списание будет по AIGate"}</span>
+              <span>{totalEstimatedCost ? `Ориентир всего: $${totalEstimatedCost.toFixed(4)}` : "Списание будет по AIGate"}</span>
+              {effectiveQueueCount > 1 && estimatedCost && <span>Одно видео: примерно ${estimatedCost.toFixed(4)}</span>}
             </div>
             <button className="primary-action" type="button" onClick={handleGenerate} disabled={submitting || booting || modeUnavailable}>
-              {submitting ? "Генерация идёт" : "Запустить видео"}
+              {submitting ? (effectiveQueueCount > 1 ? "Очередь запускается" : "Генерация идёт") : (effectiveQueueCount > 1 ? `Запустить ${effectiveQueueCount} видео` : "Запустить видео")}
             </button>
           </section>
 
@@ -919,25 +1213,44 @@ export default function App() {
           )}
 
           {/* History */}
-          {history.length > 0 && (
-            <section className="panel recent-results">
-              <div className="section-title">
-                <span>Последние результаты</span>
-                <small>для потока</small>
-              </div>
-              {history.slice(0, 4).map((item) => (
-                <article className="recent-item" key={item.id}>
-                  <div>
-                    <strong>#{item.id} / {STATUS_LABELS[item.status] || item.status}</strong>
-                    <span>{item.quality} / {item.duration} c / {item.resolution} / {item.ratio}</span>
-                  </div>
-                  {item.result_url && <a href={absoluteUrl(item.result_url)} download>Скачать</a>}
-                </article>
-              ))}
-            </section>
-          )}
+          <section className="panel recent-results">
+            <div className="section-title">
+              <span>Последние результаты</span>
+              <small>Reuse prompt/settings</small>
+            </div>
+            {history.length > 0 ? (
+              history.slice(0, 4).map((item) => {
+                const hasSavedRefs = Boolean(item.reference_assets?.length);
+                const isRestoring = restoringHistoryId === item.id;
+                return (
+                  <article className="recent-item" key={item.id}>
+                    <div className="recent-main">
+                      <strong>#{item.id} / {STATUS_LABELS[item.status] || item.status}</strong>
+                      <span>{item.quality} / {item.duration} c / {item.resolution} / {item.ratio}</span>
+                      <small>{hasSavedRefs ? `${item.reference_assets.length} refs saved` : "no saved refs"}</small>
+                    </div>
+                    <div className="recent-actions">
+                      <button type="button" onClick={() => applyHistorySettings(item)}>Reuse</button>
+                      <button
+                        type="button"
+                        onClick={() => applyHistorySettings(item, true)}
+                        disabled={!hasSavedRefs || isRestoring}
+                        title={hasSavedRefs ? "Restore prompt, settings and references" : "This result has no saved references"}
+                      >
+                        {isRestoring ? "Loading" : "Reuse + refs"}
+                      </button>
+                      {item.result_url && <a href={absoluteUrl(item.result_url)} download>Download</a>}
+                    </div>
+                  </article>
+                );
+              })
+            ) : (
+              <p className="recent-empty">After the first generation, Reuse buttons will appear here.</p>
+            )}
+          </section>
         </main>
       )}
+
 
       {page === "profile" && (
         <main className="settings-grid">

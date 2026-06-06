@@ -81,6 +81,7 @@ export async function submitGeneration({
   resolution,
   ratio,
   audio,
+  videoReferenceMode,
   negativePrompt,
   seed,
   imageFiles,
@@ -95,6 +96,7 @@ export async function submitGeneration({
   form.append("resolution", resolution);
   form.append("ratio", ratio);
   form.append("audio", audio ? "true" : "false");
+  form.append("video_reference_mode", videoReferenceMode || "motion");
   if (negativePrompt?.trim()) form.append("negative_prompt", negativePrompt.trim());
   if (seed !== "" && seed !== null && seed !== undefined) form.append("seed", seed);
   for (const file of imageFiles) form.append("image_files", file);
@@ -109,6 +111,10 @@ export async function submitGeneration({
 
 export async function fetchHistory(limit = 8) {
   return postForm("/api/history", { limit });
+}
+
+export async function fetchReferenceAssets(limit = 80) {
+  return postForm("/api/reference-assets", { limit });
 }
 
 export async function setApiKey(key) {
