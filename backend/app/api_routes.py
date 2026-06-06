@@ -184,30 +184,35 @@ def normalize_reference_tags(
     *,
     image_sheet: bool = False,
     audio_from_video: bool = False,
+    lipsync_only: bool = False,
 ) -> str:
     prompt = normalize_reference_mentions(prompt, image_count=image_count, has_video=has_video, has_audio=has_audio)
 
     prefix_parts: List[str] = []
-    if image_sheet:
-        image_tags = ", ".join(f"Image{index}" for index in range(1, image_count + 1))
-        prefix_parts.append(
-            f"The input image is a labeled reference sheet containing {image_tags}; "
-            "treat each panel as a separate visual reference and ignore labels, borders, and file names."
-        )
-    elif image_count:
-        image_map = "; ".join(f"@Image{index}=uploaded image reference {index}" for index in range(1, image_count + 1))
-        prefix_parts.append(
-            f"Reference map: {image_map}. "
-            "Treat each @ImageN as a separate source. Do not merge identities, outfits, objects, or instructions "
-            "between different image references. When the prompt mentions @ImageN, apply only that referenced image "
-            "to that specific character, object, scene beat, or instruction. Keep the referenced subject's full head, "
-            "face, and important outfit details in frame unless the user explicitly asks for a close-up crop."
-        )
-    if image_count and not re.search(r"@Image\d+", prompt, flags=re.IGNORECASE):
-        image_tags = ", ".join(f"@Image{index}" for index in range(1, image_count + 1))
-        prefix_parts.append(f"Use {image_tags} as visual reference.")
-    if has_video and not re.search(r"@Video\d+", prompt, flags=re.IGNORECASE):
-        prefix_parts.append("Use @Video1 as motion/video reference.")
+
+    # In pure lipsync mode the video is used only for audio — no visual image prefix needed.
+    if not lipsync_only:
+        if image_sheet:
+            image_tags = ", ".join(f"Image{index}" for index in range(1, image_count + 1))
+            prefix_parts.append(
+                f"The input image is a labeled reference sheet containing {image_tags}; "
+                "treat each panel as a separate visual reference and ignore labels, borders, and file names."
+            )
+        elif image_count:
+            image_map = "; ".join(f"@Image{index}=uploaded image reference {index}" for index in range(1, image_count + 1))
+            prefix_parts.append(
+                f"Reference map: {image_map}. "
+                "Treat each @ImageN as a separate source. Do not merge identities, outfits, objects, or instructions "
+                "between different image references. When the prompt mentions @ImageN, apply only that referenced image "
+                "to that specific character, object, scene beat, or instruction. Keep the referenced subject's full head, "
+                "face, and important outfit details in frame unless the user explicitly asks for a close-up crop."
+            )
+        if image_count and not re.search(r"@Image\d+", prompt, flags=re.IGNORECASE):
+            image_tags = ", ".join(f"@Image{index}" for index in range(1, image_count + 1))
+            prefix_parts.append(f"Use {image_tags} as visual reference.")
+        if has_video and not re.search(r"@Video\d+", prompt, flags=re.IGNORECASE):
+            prefix_parts.append("Use @Video1 as motion/video reference.")
+
     if has_audio and audio_from_video:
         prefix_parts.append(
             "Use the attached audio reference extracted from the uploaded video for precise lip-sync and audio timing. "
@@ -1082,6 +1087,7 @@ async def api_generate(request: Request):
         bool(audio_url or audio_b64),
         image_sheet=use_image_sheet and source_image_count > 1,
         audio_from_video=audio_from_video,
+        lipsync_only=(video_reference_mode == "lipsync"),
     )
     prompt = add_ocr_instruction_text(prompt, ocr_instruction_texts)
     prompt = add_negative_constraints_to_prompt(prompt, negative_prompt)
@@ -1139,6 +1145,7 @@ async def api_generate(request: Request):
             generation_id=generation_id,
             model=model,
             prompt=prompt,
+            source_prompt=source_prompt,
             negative_prompt=negative_prompt or None,
             image_urls=image_urls or None,
             images_b64=images_b64,
@@ -1173,6 +1180,7 @@ async def run_generation(
     generation_id: int,
     model: str,
     prompt: str,
+    source_prompt: str,
     negative_prompt: Optional[str],
     image_urls: Optional[List[str]],
     images_b64: List[str],
@@ -1266,7 +1274,7 @@ async def run_generation(
             ratio=ratio,
             audio=audio,
             refs_count=refs_count,
-            prompt=prompt,
+            prompt=source_prompt,
         )
     except AIGateError as exc:
         logger.warning("AIGate generation %s failed: %s", generation_id, exc, exc_info=True)
@@ -1282,7 +1290,7 @@ async def run_generation(
             ratio=ratio,
             audio=audio,
             refs_count=refs_count,
-            prompt=prompt,
+            prompt=source_prompt,
             error=str(exc),
         )
     except Exception as exc:
@@ -1299,7 +1307,7 @@ async def run_generation(
             ratio=ratio,
             audio=audio,
             refs_count=refs_count,
-            prompt=prompt,
+            prompt=source_prompt,
             error=str(exc),
         )
 
