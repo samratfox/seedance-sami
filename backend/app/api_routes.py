@@ -213,12 +213,9 @@ def normalize_reference_tags(
         if has_video and not re.search(r"@Video\d+", prompt, flags=re.IGNORECASE):
             prefix_parts.append("Use @Video1 as motion/video reference.")
 
-    if has_audio and audio_from_video:
-        prefix_parts.append(
-            "Use the attached audio reference extracted from the uploaded video for precise lip-sync and audio timing. "
-            "Do not invent a different voice, music, or soundtrack."
-        )
-    elif has_audio and not re.search(r"@Audio\d+", prompt, flags=re.IGNORECASE):
+    # For audio: only add hint if it's a standalone audio file (not extracted from video).
+    # When audio_from_video=True the user controls lipsync via their own prompt.
+    if has_audio and not audio_from_video and not re.search(r"@Audio\d+", prompt, flags=re.IGNORECASE):
         prefix_parts.append("Use @Audio1 as audio/rhythm reference.")
 
     if prefix_parts:
@@ -1057,18 +1054,7 @@ async def api_generate(request: Request):
     if audio_from_video:
         audio = True
 
-    if video_uploads and video_reference_mode == "lipsync" and audio_from_video:
-        prompt = (
-            f"{prompt}\n\n"
-            "Use the audio extracted from the uploaded video as the lip-sync source. "
-            "Ignore the uploaded video's visual frames; do not use them as motion reference."
-        )
-    elif video_uploads and video_reference_mode == "motion_lipsync" and audio_uploads:
-        prompt = (
-            f"{prompt}\n\n"
-            "Use @Video1 as motion/camera/choreography reference. "
-            "Use the audio extracted from that same uploaded video as the lip-sync source."
-        )
+    # Do not inject any prompt text for lipsync modes — the user's prompt is used as-is.
 
     image_urls = await try_upload_refs_to_cloudinary(image_payload_uploads, resource_type="image", prefix="image")
     video_urls = await try_upload_refs_to_cloudinary(video_payload_uploads, resource_type="video", prefix="video")
