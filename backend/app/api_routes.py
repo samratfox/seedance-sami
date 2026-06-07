@@ -1096,10 +1096,10 @@ async def api_generate(request: Request):
     image_payload_uploads = build_image_reference_uploads(prepared_image_uploads) if use_image_sheet else prepared_image_uploads
     use_visual_video = visual_video_references_enabled(video_reference_mode)
 
-    # === FINAL LIPSYNC LOGIC ===
+    # === FINAL CORRECT LIPSYNC LOGIC ===
     extracted_audio_upload = None
     audio_from_video = False
-    video_payload_uploads = video_uploads  # keep video by default
+    video_payload_uploads = video_uploads  # keep by default
 
     if video_uploads and settings.EXTRACT_AUDIO_FROM_VIDEO:
         if video_reference_mode in ("lipsync", "motion_lipsync"):
@@ -1109,12 +1109,14 @@ async def api_generate(request: Request):
                 audio_from_video = True
 
         if video_reference_mode == "lipsync":
-            # Keep the video so it becomes @Video1 (provides audio track + timing for lipsync)
-            # The prompt tells the model to use it only for audio, ignore visual (black square)
-            pass  # video stays
+            # Keep video so it becomes @Video1 (audio track + timing)
+            pass
 
-    # When we have audio reference → force audio=False so model uses our track
+    # Force audio=False when we have audio reference
     final_audio_param = False if (audio_from_video or audio_uploads) else audio
+
+    # Update original audio var for consistent notifications and DB
+    audio = final_audio_param
 
     # Do not inject any prompt text for lipsync modes — the user's prompt is used as-is.
 
