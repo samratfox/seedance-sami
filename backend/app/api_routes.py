@@ -1095,13 +1095,11 @@ async def api_generate(request: Request):
     prepared_image_uploads = prepare_image_reference_uploads(image_uploads, ratio)
     image_payload_uploads = build_image_reference_uploads(prepared_image_uploads) if use_image_sheet else prepared_image_uploads
     use_visual_video = visual_video_references_enabled(video_reference_mode)
-    # Always pass video in payload — model reads @Video1 tag and extracts audio itself.
-    # This matches how Railway/RunwayML handles lipsync: video goes as reference_videos,
-    # prompt says "@Video1 lipsync" and model does the rest.
-    # For motion_lipsync: also extract audio via ffmpeg as extra audio_b64 backup.
+
     # Lipsync mode: extract audio from video, don't send video as visual reference
     extracted_audio_upload = None
     audio_from_video = False
+
     if video_uploads and video_reference_mode == "lipsync" and settings.EXTRACT_AUDIO_FROM_VIDEO:
         extracted_audio_upload = await extract_audio_from_video_upload(video_uploads[0], duration)
         if extracted_audio_upload:
@@ -1212,7 +1210,6 @@ async def api_generate(request: Request):
             quality=model_mode,
             seed=seed,
             refs_count=refs_count,
-            is_lipsync=(video_reference_mode == "lipsync"),
         )
     )
 
