@@ -1096,7 +1096,7 @@ async def api_generate(request: Request):
     image_payload_uploads = build_image_reference_uploads(prepared_image_uploads) if use_image_sheet else prepared_image_uploads
     use_visual_video = visual_video_references_enabled(video_reference_mode)
 
-    # === FIXED LIPSYNC LOGIC (v2) ===
+    # === FINAL LIPSYNC LOGIC ===
     extracted_audio_upload = None
     audio_from_video = False
     video_payload_uploads = video_uploads  # keep video by default
@@ -1109,12 +1109,11 @@ async def api_generate(request: Request):
                 audio_from_video = True
 
         if video_reference_mode == "lipsync":
-            # For pure lipsync we KEEP the video so it becomes @Video1 (audio source)
-            # The prompt will instruct the model to ignore visual from it and only use audio for lipsync.
-            # Do NOT discard video_payload_uploads — otherwise there is no @Video1 to sync to.
-            pass  # keep video
+            # Keep the video so it becomes @Video1 (provides audio track + timing for lipsync)
+            # The prompt tells the model to use it only for audio, ignore visual (black square)
+            pass  # video stays
 
-    # CRITICAL: When using audio reference → force audio=False so Seedance uses the reference track
+    # When we have audio reference → force audio=False so model uses our track
     final_audio_param = False if (audio_from_video or audio_uploads) else audio
 
     # Do not inject any prompt text for lipsync modes — the user's prompt is used as-is.
