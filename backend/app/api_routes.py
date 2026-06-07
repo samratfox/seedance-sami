@@ -218,8 +218,13 @@ def normalize_reference_tags(
         if has_video and not re.search(r"@Video\d+", prompt, flags=re.IGNORECASE):
             prefix_parts.append("Use @Video1 as motion/video reference.")
 
-    # Never inject audio instructions — user controls this via their own prompt.
-    if has_audio and not audio_from_video and not re.search(r"@Audio\d+", prompt, flags=re.IGNORECASE):
+    # For lipsync with audio from video: instruct model to use @Video1 as audio source
+    if audio_from_video and not re.search(r"@Video\d+", prompt, flags=re.IGNORECASE):
+        prefix_parts.append(
+            "Use @Video1 as the audio source for precise lip-sync. "
+            "Match the character's lip movements exactly to the audio track from @Video1."
+        )
+    elif has_audio and not audio_from_video and not re.search(r"@Audio\d+", prompt, flags=re.IGNORECASE):
         prefix_parts.append("Use @Audio1 as audio/rhythm reference.")
 
     if prefix_parts:
@@ -1094,24 +1099,31 @@ async def api_generate(request: Request):
     # This matches how Railway/RunwayML handles lipsync: video goes as reference_videos,
     # prompt says "@Video1 lipsync" and model does the rest.
     # For motion_lipsync: also extract audio via ffmpeg as extra audio_b64 backup.
-    video_payload_uploads = video_uploads
-
+    # Lipsync mode: extract audio from video, don't send video as visual reference
     extracted_audio_upload = None
     audio_from_video = False
-    if video_uploads and video_reference_mode == "motion_lipsync" and settings.EXTRACT_AUDIO_FROM_VIDEO:
+    if video_uploads and video_reference_mode == "lipsync" and settings.EXTRACT_AUDIO_FROM_VIDEO:
+        extracted_audio_upload = await extract_audio_from_video_upload(video_uploads[0], duration)
+        if extracted_audio_upload:
+            audio_uploads = [extracted_audio_upload]
+            audio_from_video = True
+            audio = True  # signal to model that audio output is needed
+        # In lipsync mode, video is ONLY for audio extraction — no visual reference
+        video_payload_uploads = []
+    elif video_uploads and video_reference_mode == "motion_lipsync" and settings.EXTRACT_AUDIO_FROM_VIDEO:
         extracted_audio_upload = await extract_audio_from_video_upload(video_uploads[0], duration)
         if extracted_audio_upload and not audio_uploads:
             audio_uploads = [extracted_audio_upload]
             audio_from_video = True
-
-    if video_uploads and video_reference_mode == "lipsync":
-        audio = True  # signal to model that audio output is needed
+        video_payload_uploads = video_uploads
+    else:
+        video_payload_uploads = video_uploads
 
     # Do not inject any prompt text for lipsync modes — the user's prompt is used as-is.
 
     image_urls = await try_upload_refs_to_cloudinary(image_payload_uploads, resource_type="image", prefix="image")
     video_urls = await try_upload_refs_to_cloudinary(video_payload_uploads, resource_type="video", prefix="video")
-    audio_urls = await try_upload_refs_to_cloudinary(audio_uploads, resource_type="video", prefix="audio")
+    audio_urls = await try_upload_refs_to_cloudinary(audio_uploads, resource_type="raw", prefix="audio")
 
     images_b64 = [item["b64"] for item in image_payload_uploads] or images_b64
     video_b64 = video_payload_uploads[0]["b64"] if video_payload_uploads else None
@@ -1236,7 +1248,6 @@ async def run_generation(
     quality: str,
     seed: Optional[int],
     refs_count: int,
-    is_lipsync: bool = False,
 ):
     client = AIGateClient(api_key)
     try:
@@ -1265,7 +1276,6 @@ async def run_generation(
             quality=None,
             negative_prompt=negative_prompt,
             seed=seed,
-            is_lipsync=is_lipsync,
         )
 
         source_url = extract_video_url(result)
