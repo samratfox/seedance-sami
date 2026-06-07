@@ -1190,14 +1190,7 @@ export default function App() {
               {effectiveQueueCount > 1 && <span>Очередь: {effectiveQueueCount} видео</span>}
               {queuePromptItems.length > 0 && <span>Промпты: разные для каждого видео</span>}
               {videoFile && <span>Видео-режим: {videoReferenceMode === "motion" ? "движение/камера" : videoReferenceMode === "motion_lipsync" ? "движение+липсинк" : "липсинк/аудио"}</span>}
-              <span>
-                {imageFiles.length} фото, {videoFile ? "1 видео" : "без видео"}
-                {audioFile 
-                  ? ", 1 аудио" 
-                  : (videoFile && (videoReferenceMode === "lipsync" || videoReferenceMode === "motion_lipsync"))
-                    ? ", аудио из видео (липсинк)"
-                    : ", без аудио"}
-              </span>
+              <span>{imageFiles.length} фото, {videoFile ? "1 видео" : "без видео"}, {audioFile ? "1 аудио" : "без аудио"}</span>
               <span>{totalEstimatedCost ? `Ориентир всего: $${totalEstimatedCost.toFixed(4)}` : "Списание будет по AIGate"}</span>
               {effectiveQueueCount > 1 && estimatedCost && <span>Одно видео: примерно ${estimatedCost.toFixed(4)}</span>}
             </div>

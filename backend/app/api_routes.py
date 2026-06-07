@@ -718,11 +718,12 @@ async def upload_refs_to_cloudinary(
             params = {"public_id": public_id, "timestamp": str(int(time.time()))}
 
             data = aiohttp.FormData()
+            suffix = upload_suffix(upload)
             data.add_field(
                 "file",
                 upload["content"],
-                filename=f"{prefix}.bin",
-                content_type=upload["content_type"],
+                filename=f"{prefix}{suffix}",
+                content_type=upload["content_type"] or "application/octet-stream",
             )
             data.add_field("api_key", settings.CLOUDINARY_API_KEY)
             data.add_field("public_id", params["public_id"])
@@ -1096,10 +1097,10 @@ async def api_generate(request: Request):
     image_payload_uploads = build_image_reference_uploads(prepared_image_uploads) if use_image_sheet else prepared_image_uploads
     use_visual_video = visual_video_references_enabled(video_reference_mode)
 
-    # === FINAL CORRECT LIPSYNC LOGIC ===
+    # === FINAL LIPSYNC LOGIC (video as input_video) ===
     extracted_audio_upload = None
     audio_from_video = False
-    video_payload_uploads = video_uploads  # keep by default
+    video_payload_uploads = video_uploads
 
     if video_uploads and settings.EXTRACT_AUDIO_FROM_VIDEO:
         if video_reference_mode in ("lipsync", "motion_lipsync"):
@@ -1108,15 +1109,9 @@ async def api_generate(request: Request):
                 audio_uploads = [extracted_audio_upload] if not audio_uploads else audio_uploads + [extracted_audio_upload]
                 audio_from_video = True
 
-        if video_reference_mode == "lipsync":
-            # Keep video so it becomes @Video1 (audio track + timing)
-            pass
-
-    # Force audio=False when we have audio reference
     final_audio_param = False if (audio_from_video or audio_uploads) else audio
-
-    # Update original audio var for consistent notifications and DB
     audio = final_audio_param
+    is_lipsync_mode = video_reference_mode in ("lipsync", "motion_lipsync")
 
     # Do not inject any prompt text for lipsync modes — the user's prompt is used as-is.
 
@@ -1130,7 +1125,7 @@ async def api_generate(request: Request):
     video_url = video_urls[0] if video_urls else None
     audio_url = audio_urls[0] if audio_urls else None
     # No hard requirement for Cloudinary URLs — b64 fallback is used if URLs unavailable.
-    refs_count = source_image_count + (1 if video_uploads else 0) + (1 if audio_uploads or audio_from_video else 0)
+    refs_count = source_image_count + (1 if video_uploads else 0) + (1 if explicit_audio_count else 0)
     prompt = normalize_reference_tags(
         prompt,
         source_image_count,
@@ -1207,7 +1202,7 @@ async def api_generate(request: Request):
             duration=duration,
             resolution=resolution,
             ratio=ratio,
-            audio=final_audio_param,
+            audio=audio,
             quality=model_mode,
             seed=seed,
             refs_count=refs_count,
