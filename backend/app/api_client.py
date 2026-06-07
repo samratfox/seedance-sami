@@ -265,6 +265,7 @@ class AIGateClient:
             "resolution": resolution,
             "aspect_ratio": aspect_ratio,
             "audio": audio,
+            "generate_audio": audio,
             "n": 1,
         }
 
@@ -309,6 +310,7 @@ class AIGateClient:
 
         if image_urls:
             image_refs = image_urls[: settings.MAX_IMAGE_REFERENCES]
+            payload["image_urls"] = image_refs
             payload["input_image"] = image_refs[0]
             if include_extra_refs and len(image_refs) > 1:
                 provider_options = payload.setdefault("provider_options", {})
@@ -323,13 +325,15 @@ class AIGateClient:
             # Seedance needs the motion-reference video in provider_options.reference_videos.
             # Passing it as input_video triggers a video-to-video transform instead of
             # reading the choreography/motion from the clip — which is never what we want here.
+            payload["video_urls"] = [video_url]
             provider_options = payload.setdefault("provider_options", {})
             provider_options["reference_videos"] = [video_url]
 
         if audio_url and include_extra_refs:
-            payload["input_audio"] = audio_url
-            payload["audio_reference"] = audio_url
-            payload.setdefault("provider_options", {})["audio_reference"] = audio_url
+            payload["audio_urls"] = [audio_url]
+            provider_options = payload.setdefault("provider_options", {})
+            provider_options["audio_urls"] = [audio_url]
+            provider_options["audio_reference"] = audio_url
 
         return payload
 
@@ -383,8 +387,6 @@ class AIGateClient:
             provider_options["reference_videos_b64"] = [video_b64]
 
         if audio_b64 and include_extra_refs:
-            payload["input_audio_b64"] = audio_b64
-            payload["audio_reference_b64"] = audio_b64
             payload.setdefault("provider_options", {})["audio_reference_b64"] = audio_b64
 
         return payload

@@ -15,7 +15,7 @@ import time
 import uuid
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl
 
 import aiohttp
@@ -29,6 +29,11 @@ from app.websocket import manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+DEFAULT_NEGATIVE_CONSTRAINTS = (
+    "no borders, no frames, no black bars, no letterbox, no pillarbox, no photo frame, "
+    "no sticker outline, no white outline, no screenshot UI, fill the entire video frame edge to edge"
+)
 
 
 def cloudinary_configured() -> bool:
@@ -213,8 +218,7 @@ def normalize_reference_tags(
         if has_video and not re.search(r"@Video\d+", prompt, flags=re.IGNORECASE):
             prefix_parts.append("Use @Video1 as motion/video reference.")
 
-    # For audio: only add hint if it's a standalone audio file (not extracted from video).
-    # When audio_from_video=True the user controls lipsync via their own prompt.
+    # Never inject audio instructions — user controls this via their own prompt.
     if has_audio and not audio_from_video and not re.search(r"@Audio\d+", prompt, flags=re.IGNORECASE):
         prefix_parts.append("Use @Audio1 as audio/rhythm reference.")
 
@@ -338,10 +342,11 @@ def add_ocr_instruction_text(prompt: str, extracted: Dict[int, str]) -> str:
 
 
 def add_negative_constraints_to_prompt(prompt: str, negative_prompt: str) -> str:
+    constraints = DEFAULT_NEGATIVE_CONSTRAINTS
     negative_prompt = (negative_prompt or "").strip()
-    if not negative_prompt:
-        return prompt
-    return f"{prompt}\n\nNegative constraints / avoid: {negative_prompt}"
+    if negative_prompt:
+        constraints = f"{negative_prompt}, {constraints}"
+    return f"{prompt}\n\nNegative constraints / avoid: {constraints}"
 
 
 async def upload_to_b64(
@@ -438,15 +443,68 @@ def parse_aspect_ratio(ratio: str) -> float:
     return 16 / 9
 
 
-def make_no_crop_reference(upload: Dict[str, str], ratio: str, index: int) -> Dict[str, str]:
-    if not settings.PREPARE_IMAGE_REFERENCES:
-        return upload
+def pil_image_upload(image: Image.Image, filename: str, *, quality: int = 94) -> Dict[str, str]:
+    output = BytesIO()
+    image.convert("RGB").save(output, format="JPEG", quality=quality, optimize=True, progressive=True)
+    content = output.getvalue()
+    return {
+        "filename": filename,
+        "content_type": "image/jpeg",
+        "content": content,
+        "b64": base64.b64encode(content).decode("utf-8"),
+    }
 
+
+def strip_phone_screenshot_ui(source: Image.Image) -> Tuple[Image.Image, bool]:
+    if not settings.CROP_PHONE_SCREENSHOT_UI:
+        return source, False
+
+    width, height = source.size
+    if width < 360 or height < 700 or height / max(width, 1) < 1.65:
+        return source, False
+
+    gray = source.convert("L")
+    resample = getattr(Image, "Resampling", Image).BILINEAR
+    row_luma = [value for value in gray.resize((1, height), resample).getdata()]
+    lower_start = int(height * 0.55)
+    lower_mean = sum(row_luma[lower_start:]) / max(1, height - lower_start)
+    if lower_mean > 75:
+        return source, False
+
+    dark_threshold = 38
+    min_band = 8
+    start = int(height * 0.30)
+    end = int(height * 0.72)
+    crop_y = None
+    for y in range(start, max(start, end - min_band)):
+        if all(row_luma[y + offset] < dark_threshold for offset in range(min_band)):
+            above_start = max(0, y - 80)
+            above_mean = sum(row_luma[above_start:y]) / max(1, y - above_start)
+            if above_mean > lower_mean + 10:
+                crop_y = y
+                break
+
+    if not crop_y or crop_y < int(height * 0.35):
+        return source, False
+
+    cropped = source.crop((0, 0, width, crop_y))
+    logger.info("Cropped phone screenshot UI from image reference: %sx%s -> %sx%s", width, height, width, crop_y)
+    return cropped, True
+
+
+def make_no_crop_reference(upload: Dict[str, str], ratio: str, index: int) -> Dict[str, str]:
     try:
         source = Image.open(BytesIO(upload["content"]))
         source = ImageOps.exif_transpose(source).convert("RGB")
+        source, cropped_ui = strip_phone_screenshot_ui(source)
     except Exception as exc:
-        logger.warning("Cannot prepare no-crop image reference %s: %s", index, exc)
+        logger.warning("Cannot prepare image reference %s: %s", index, exc)
+        return upload
+
+    mode = settings.REFERENCE_PAD_MODE.strip().lower()
+    if not settings.PREPARE_IMAGE_REFERENCES or mode in {"raw", "original", "none"}:
+        if cropped_ui:
+            return pil_image_upload(source, f"reference_{index}_clean.jpg")
         return upload
 
     target_ratio = parse_aspect_ratio(ratio)
@@ -459,10 +517,14 @@ def make_no_crop_reference(upload: Dict[str, str], ratio: str, index: int) -> Di
         canvas_w = max(1, round(long_edge * target_ratio))
 
     resample = getattr(Image, "Resampling", Image).LANCZOS
+    if mode in {"cover", "crop", "fill"}:
+        covered = ImageOps.fit(source.copy(), (canvas_w, canvas_h), method=resample, centering=(0.5, 0.45))
+        return pil_image_upload(covered, f"reference_{index}_cover.jpg")
+
     fit = source.copy()
     fit.thumbnail((canvas_w, canvas_h), resample)
 
-    if settings.REFERENCE_PAD_MODE.strip().lower() == "blur":
+    if mode == "blur":
         background = ImageOps.fit(source.copy(), (canvas_w, canvas_h), method=resample, centering=(0.5, 0.5))
         try:
             from PIL import ImageFilter
@@ -476,16 +538,7 @@ def make_no_crop_reference(upload: Dict[str, str], ratio: str, index: int) -> Di
     x = (canvas_w - fit.width) // 2
     y = (canvas_h - fit.height) // 2
     background.paste(fit, (x, y))
-
-    output = BytesIO()
-    background.save(output, format="JPEG", quality=94, optimize=True, progressive=True)
-    content = output.getvalue()
-    return {
-        "filename": f"reference_{index}_no_crop.jpg",
-        "content_type": "image/jpeg",
-        "content": content,
-        "b64": base64.b64encode(content).decode("utf-8"),
-    }
+    return pil_image_upload(background, f"reference_{index}_no_crop.jpg")
 
 
 def prepare_image_reference_uploads(uploads: List[Dict[str, str]], ratio: str) -> List[Dict[str, str]]:
@@ -560,7 +613,7 @@ def visual_video_references_enabled(video_reference_mode: str) -> bool:
     return normalize_video_reference_mode(video_reference_mode) in {"motion", "motion_lipsync"}
 
 
-async def extract_audio_from_video_upload(upload: Dict[str, str]) -> Optional[Dict[str, str]]:
+async def extract_audio_from_video_upload(upload: Dict[str, str], duration: int) -> Optional[Dict[str, str]]:
     if not settings.EXTRACT_AUDIO_FROM_VIDEO:
         return None
 
@@ -583,6 +636,8 @@ async def extract_audio_from_video_upload(upload: Dict[str, str]) -> Optional[Di
             "error",
             "-i",
             str(input_path),
+            "-t",
+            str(max(1, min(int(duration or 15), 15))),
             "-vn",
             "-ac",
             "2",
@@ -1035,24 +1090,22 @@ async def api_generate(request: Request):
     prepared_image_uploads = prepare_image_reference_uploads(image_uploads, ratio)
     image_payload_uploads = build_image_reference_uploads(prepared_image_uploads) if use_image_sheet else prepared_image_uploads
     use_visual_video = visual_video_references_enabled(video_reference_mode)
-    video_payload_uploads = video_uploads if use_visual_video else []
-    should_extract_video_audio = video_reference_mode in {"lipsync", "motion_lipsync"}
+    # Always pass video in payload — model reads @Video1 tag and extracts audio itself.
+    # This matches how Railway/RunwayML handles lipsync: video goes as reference_videos,
+    # prompt says "@Video1 lipsync" and model does the rest.
+    # For motion_lipsync: also extract audio via ffmpeg as extra audio_b64 backup.
+    video_payload_uploads = video_uploads
 
     extracted_audio_upload = None
     audio_from_video = False
-    if video_uploads and should_extract_video_audio and settings.EXTRACT_AUDIO_FROM_VIDEO:
-        extracted_audio_upload = await extract_audio_from_video_upload(video_uploads[0])
+    if video_uploads and video_reference_mode == "motion_lipsync" and settings.EXTRACT_AUDIO_FROM_VIDEO:
+        extracted_audio_upload = await extract_audio_from_video_upload(video_uploads[0], duration)
         if extracted_audio_upload and not audio_uploads:
             audio_uploads = [extracted_audio_upload]
             audio_from_video = True
-        elif not extracted_audio_upload and not audio_uploads and not use_visual_video:
-            raise HTTPException(
-                status_code=400,
-                detail="Не удалось извлечь аудио из видео-референса. Переключите видео-референс в режим движения или загрузите аудио отдельно.",
-            )
 
-    if audio_from_video:
-        audio = True
+    if video_uploads and video_reference_mode == "lipsync":
+        audio = True  # signal to model that audio output is needed
 
     # Do not inject any prompt text for lipsync modes — the user's prompt is used as-is.
 
@@ -1065,6 +1118,7 @@ async def api_generate(request: Request):
     audio_b64 = audio_uploads[0]["b64"] if audio_uploads else audio_b64
     video_url = video_urls[0] if video_urls else None
     audio_url = audio_urls[0] if audio_urls else None
+    # No hard requirement for Cloudinary URLs — b64 fallback is used if URLs unavailable.
     refs_count = source_image_count + (1 if video_uploads else 0) + (1 if explicit_audio_count else 0)
     prompt = normalize_reference_tags(
         prompt,
