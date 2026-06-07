@@ -1096,26 +1096,25 @@ async def api_generate(request: Request):
     image_payload_uploads = build_image_reference_uploads(prepared_image_uploads) if use_image_sheet else prepared_image_uploads
     use_visual_video = visual_video_references_enabled(video_reference_mode)
 
-    # Lipsync mode: extract audio from video, don't send video as visual reference
+    # === FIXED LIPSYNC LOGIC ===
     extracted_audio_upload = None
     audio_from_video = False
+    video_payload_uploads = video_uploads  # default
 
-    if video_uploads and video_reference_mode == "lipsync" and settings.EXTRACT_AUDIO_FROM_VIDEO:
-        extracted_audio_upload = await extract_audio_from_video_upload(video_uploads[0], duration)
-        if extracted_audio_upload:
-            audio_uploads = [extracted_audio_upload]
-            audio_from_video = True
-            audio = True  # signal to model that audio output is needed
-        # In lipsync mode, video is ONLY for audio extraction — no visual reference
-        video_payload_uploads = []
-    elif video_uploads and video_reference_mode == "motion_lipsync" and settings.EXTRACT_AUDIO_FROM_VIDEO:
-        extracted_audio_upload = await extract_audio_from_video_upload(video_uploads[0], duration)
-        if extracted_audio_upload and not audio_uploads:
-            audio_uploads = [extracted_audio_upload]
-            audio_from_video = True
-        video_payload_uploads = video_uploads
-    else:
-        video_payload_uploads = video_uploads
+    if video_uploads and settings.EXTRACT_AUDIO_FROM_VIDEO:
+        if video_reference_mode in ("lipsync", "motion_lipsync"):
+            extracted_audio_upload = await extract_audio_from_video_upload(video_uploads[0], duration)
+            if extracted_audio_upload:
+                audio_uploads = [extracted_audio_upload] if not audio_uploads else audio_uploads + [extracted_audio_upload]
+                audio_from_video = True
+
+        if video_reference_mode == "lipsync":
+            # Pure lipsync: video ONLY as audio source, do NOT send as visual/motion reference
+            video_payload_uploads = []
+        # motion_lipsync keeps video as motion + audio
+
+    # CRITICAL: When using audio reference → force audio=False so Seedance uses the reference track
+    final_audio_param = False if (audio_from_video or audio_uploads) else audio
 
     # Do not inject any prompt text for lipsync modes — the user's prompt is used as-is.
 
@@ -1129,7 +1128,7 @@ async def api_generate(request: Request):
     video_url = video_urls[0] if video_urls else None
     audio_url = audio_urls[0] if audio_urls else None
     # No hard requirement for Cloudinary URLs — b64 fallback is used if URLs unavailable.
-    refs_count = source_image_count + (1 if video_uploads else 0) + (1 if explicit_audio_count else 0)
+    refs_count = source_image_count + (1 if video_uploads else 0) + (1 if audio_uploads or audio_from_video else 0)
     prompt = normalize_reference_tags(
         prompt,
         source_image_count,
@@ -1206,7 +1205,7 @@ async def api_generate(request: Request):
             duration=duration,
             resolution=resolution,
             ratio=ratio,
-            audio=audio,
+            audio=final_audio_param,
             quality=model_mode,
             seed=seed,
             refs_count=refs_count,
