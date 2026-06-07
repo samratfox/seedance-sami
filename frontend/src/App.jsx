@@ -52,7 +52,7 @@ const DEFAULT_CONFIG = {
       },
     },
   },
-  max_image_references: 6,
+  max_image_references: 9,
   max_upload_mb: 16,
   max_prompt_length: 3500,
   video_reference_modes: ["motion", "lipsync", "motion_lipsync"],
@@ -454,9 +454,20 @@ export default function App() {
   }, [config, hasReferences, modelMode]);
 
   useEffect(() => {
-    const next = imageFiles.map((file) => ({ url: URL.createObjectURL(file), name: file.name }));
-    setImagePreviews(next);
-    return () => next.forEach((item) => URL.revokeObjectURL(item.url));
+    let cancelled = false;
+    const previews = [];
+    let loaded = 0;
+    if (!imageFiles.length) { setImagePreviews([]); return; }
+    imageFiles.forEach((file, index) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        previews[index] = { url: e.target.result, name: file.name };
+        loaded += 1;
+        if (loaded === imageFiles.length && !cancelled) setImagePreviews([...previews]);
+      };
+      reader.readAsDataURL(file);
+    });
+    return () => { cancelled = true; };
   }, [imageFiles]);
 
   useEffect(() => {

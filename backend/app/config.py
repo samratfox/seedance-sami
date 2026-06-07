@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     MAX_PROMPT_LENGTH: int = 3500
     MAX_GENERATION_PROMPT_LENGTH: int = 12000
     MAX_UPLOAD_MB: int = 16
-    MAX_IMAGE_REFERENCES: int = 6
+    MAX_IMAGE_REFERENCES: int = 9
     MAX_REFERENCE_ASSETS: int = 80
 
     WEBAPP_HOST: str = "0.0.0.0"

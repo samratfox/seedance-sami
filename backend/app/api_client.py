@@ -215,6 +215,7 @@ class AIGateClient:
         audio_url: Optional[str],
         audio_b64: Optional[str],
         include_extra_refs: bool,
+        is_lipsync: bool = False,
     ) -> Dict[str, Any]:
         if use_urls:
             return self._video_url_payload(
@@ -230,6 +231,7 @@ class AIGateClient:
             video_b64=video_b64,
             audio_b64=audio_b64,
             include_extra_refs=include_extra_refs,
+            is_lipsync=is_lipsync,
         )
 
     def _should_retry_with_primary_reference_only(
@@ -322,12 +324,15 @@ class AIGateClient:
                 ]
 
         if video_url:
-            # Seedance needs the motion-reference video in provider_options.reference_videos.
-            # Passing it as input_video triggers a video-to-video transform instead of
-            # reading the choreography/motion from the clip — which is never what we want here.
             payload["video_urls"] = [video_url]
             provider_options = payload.setdefault("provider_options", {})
-            provider_options["reference_videos"] = [video_url]
+            if getattr(self, "_current_is_lipsync", False):
+                # For lipsync: pass as input_video so model reads the audio track.
+                payload["input_video"] = video_url
+                provider_options["input_video"] = video_url
+            else:
+                # For motion: reference_videos gives choreography/camera.
+                provider_options["reference_videos"] = [video_url]
 
         if audio_url and include_extra_refs:
             payload["audio_urls"] = [audio_url]
@@ -353,6 +358,7 @@ class AIGateClient:
         negative_prompt: Optional[str],
         seed: Optional[int],
         include_extra_refs: bool,
+        is_lipsync: bool = False,
     ) -> Dict[str, Any]:
         payload = self._base_payload(
             model=model,
@@ -381,10 +387,14 @@ class AIGateClient:
                 ]
 
         if video_b64:
-            # Same as the URL path: motion reference must go into provider_options.reference_videos.
-            # input_video_b64 causes video-to-video, not motion transfer from @Video1.
             provider_options = payload.setdefault("provider_options", {})
-            provider_options["reference_videos_b64"] = [video_b64]
+            if is_lipsync:
+                # For lipsync: pass as input_video so model reads the audio track from it.
+                payload["input_video_b64"] = video_b64
+                provider_options["input_video_b64"] = video_b64
+            else:
+                # For motion: reference_videos gives choreography/camera without video-to-video.
+                provider_options["reference_videos_b64"] = [video_b64]
 
         if audio_b64 and include_extra_refs:
             payload.setdefault("provider_options", {})["audio_reference_b64"] = audio_b64

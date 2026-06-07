@@ -1200,6 +1200,7 @@ async def api_generate(request: Request):
             quality=model_mode,
             seed=seed,
             refs_count=refs_count,
+            is_lipsync=(video_reference_mode == "lipsync"),
         )
     )
 
@@ -1235,6 +1236,7 @@ async def run_generation(
     quality: str,
     seed: Optional[int],
     refs_count: int,
+    is_lipsync: bool = False,
 ):
     client = AIGateClient(api_key)
     try:
@@ -1263,6 +1265,7 @@ async def run_generation(
             quality=None,
             negative_prompt=negative_prompt,
             seed=seed,
+            is_lipsync=is_lipsync,
         )
 
         source_url = extract_video_url(result)
