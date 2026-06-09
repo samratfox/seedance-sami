@@ -1,10 +1,5 @@
 # AIGate Video Bot + Telegram Mini App
 
-> **Обновлено под новую документацию AIGate** (июнь 2026)  
-> - Топ-уровневые поля `reference_images`, `reference_videos`, `input_video`, `input_audio`  
-> - Улучшенная поддержка lip-sync (режимы Lipsync / Motion+Lipsync теперь корректно используют `input_video`)  
-> - Убраны устаревшие `provider_options` для референсов
-
 Проект для генерации видео через AIGate внутри Telegram:
 
 - Telegram-бот на `aiogram 3`

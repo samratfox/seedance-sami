@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     VIDEO_REFERENCE_MODE: str = "motion"
     MULTI_IMAGE_REFERENCE_MODE: str = "separate"
     STRICT_MULTI_IMAGE_REFERENCES: bool = True
+    CROP_PHONE_SCREENSHOT_UI: bool = False  # Crop phone UI chrome from screenshots before sending as image ref
     ENABLE_IMAGE_OCR: bool = True
     OCR_LANG: str = "eng+rus"
     OCR_MAX_CHARS_PER_IMAGE: int = 10000

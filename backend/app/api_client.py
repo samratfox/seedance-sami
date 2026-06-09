@@ -131,7 +131,7 @@ class AIGateClient:
         quality: Optional[str] = None,
         negative_prompt: Optional[str] = None,
         seed: Optional[int] = None,
-        video_reference_mode: str = "motion",
+        is_lipsync: bool = False,
     ) -> Dict[str, Any]:
         common = {
             "model": model,
@@ -161,7 +161,7 @@ class AIGateClient:
             audio_url=audio_url,
             audio_b64=audio_b64,
             include_extra_refs=True,
-            video_reference_mode=video_reference_mode,
+            is_lipsync=is_lipsync,
         )
 
         logger.info(
@@ -177,10 +177,34 @@ class AIGateClient:
             sorted(payload.keys()),
             prompt[:240].replace("\n", " "),
         )
-        # Always submit with full top-level reference_* fields per updated AIGate docs.
-        # Multi-ref supported for Seedance via reference_images / reference_videos / input_audio at top level.
-        # If model rejects (e.g. unsupported multi), error will surface (controlled by STRICT_MULTI_IMAGE_REFERENCES).
-        return await self._request("POST", "/video/generations", timeout=900, json=payload)
+        try:
+            return await self._request("POST", "/video/generations", timeout=900, json=payload)
+        except AIGateError as exc:
+            if not self._should_retry_with_primary_reference_only(exc, payload, audio_url or audio_b64):
+                raise
+
+            fallback_payload = self._build_video_payload(
+                use_urls=use_urls,
+                common=common,
+                image_urls=image_urls or [],
+                images_b64=images_b64 or [],
+                video_url=video_url,
+                video_b64=video_b64,
+                audio_url=audio_url,
+                audio_b64=audio_b64,
+                include_extra_refs=False,
+                is_lipsync=is_lipsync,
+            )
+            logger.warning(
+                "AIGate rejected extra reference fields, retrying with official primary reference only: "
+                "model=%s status=%s code=%s payload_keys=%s fallback_keys=%s",
+                model,
+                exc.status_code,
+                exc.code,
+                sorted(payload.keys()),
+                sorted(fallback_payload.keys()),
+            )
+            return await self._request("POST", "/video/generations", timeout=900, json=fallback_payload)
 
     def _build_video_payload(
         self,
@@ -194,7 +218,7 @@ class AIGateClient:
         audio_url: Optional[str],
         audio_b64: Optional[str],
         include_extra_refs: bool,
-        video_reference_mode: str = "motion",
+        is_lipsync: bool = False,
     ) -> Dict[str, Any]:
         if use_urls:
             return self._video_url_payload(
@@ -203,7 +227,7 @@ class AIGateClient:
                 video_url=video_url,
                 audio_url=audio_url,
                 include_extra_refs=include_extra_refs,
-                video_reference_mode=video_reference_mode,
+                is_lipsync=is_lipsync,
             )
         return self._video_b64_payload(
             **common,
@@ -211,8 +235,23 @@ class AIGateClient:
             video_b64=video_b64,
             audio_b64=audio_b64,
             include_extra_refs=include_extra_refs,
-            video_reference_mode=video_reference_mode,
+            is_lipsync=is_lipsync,
         )
+
+    def _should_retry_with_primary_reference_only(
+        self,
+        exc: AIGateError,
+        payload: Dict[str, Any],
+        has_audio_reference: bool,
+    ) -> bool:
+        if settings.STRICT_MULTI_IMAGE_REFERENCES:
+            return False
+        if exc.status_code != 400 or has_audio_reference:
+            return False
+        # reference_images is now a top-level field per updated API docs.
+        top_refs = payload.get("reference_images") or []
+        provider_options = payload.get("provider_options") or {}
+        return bool(top_refs or provider_options.get("input_images"))
 
     def _base_payload(
         self,
@@ -264,7 +303,7 @@ class AIGateClient:
         negative_prompt: Optional[str],
         seed: Optional[int],
         include_extra_refs: bool,
-        video_reference_mode: str = "motion",
+        is_lipsync: bool = False,
     ) -> Dict[str, Any]:
         payload = self._base_payload(
             model=model,
@@ -280,26 +319,32 @@ class AIGateClient:
 
         if image_urls:
             image_refs = image_urls[: settings.MAX_IMAGE_REFERENCES]
-            payload["input_image"] = image_refs[0]
-            payload["image_urls"] = image_refs
-            # Top-level reference_images for Seedance / updated AIGate docs (multi-ref support)
-            # Even single image ref recommended for Seedance when audio/video also used to avoid first-frame conflict.
+            # Per updated API docs: use reference_images as top-level field.
+            # For Seedance image+audio mode, reference_images avoids first-frame conflict.
+            # Keep input_image as fallback for single-image models that don't support reference_images.
             payload["reference_images"] = image_refs
+            if len(image_refs) == 1:
+                payload["input_image"] = image_refs[0]
+            if include_extra_refs:
+                provider_options = payload.setdefault("provider_options", {})
+                provider_options["input_images"] = image_refs
+                provider_options["image_references"] = [
+                    {"tag": f"@Image{index}", "url": url}
+                    for index, url in enumerate(image_refs, start=1)
+                ]
 
         if video_url:
-            payload["video_urls"] = [video_url]
-            if video_reference_mode in ("lipsync", "motion_lipsync"):
-                # lipsync / motion+lip-sync: use input_video so the model can read the original audio track
-                # for precise lip-sync. The prompt also instructs to sync to @Video1.
+            if is_lipsync:
+                # For lipsync: pass as input_video — model reads audio from it, not as visual ref.
                 payload["input_video"] = video_url
             else:
-                # pure motion: reference_videos for choreography, camera movement, style
+                # For motion: reference_videos is top-level per new API docs.
                 payload["reference_videos"] = [video_url]
 
-        if audio_url:
+        if audio_url and include_extra_refs:
+            # Per updated API docs: input_audio / audio_url are top-level fields.
             payload["input_audio"] = audio_url
-            payload["audio_urls"] = [audio_url]
-            # input_audio at top-level per updated docs for Seedance audio reference
+            payload["audio_url"] = audio_url
 
         return payload
 
@@ -319,7 +364,7 @@ class AIGateClient:
         negative_prompt: Optional[str],
         seed: Optional[int],
         include_extra_refs: bool,
-        video_reference_mode: str = "motion",
+        is_lipsync: bool = False,
     ) -> Dict[str, Any]:
         payload = self._base_payload(
             model=model,
@@ -335,22 +380,30 @@ class AIGateClient:
 
         if images_b64:
             image_refs = images_b64[: settings.MAX_IMAGE_REFERENCES]
-            payload["input_image_b64"] = image_refs[0]
-            # Top-level reference_images_b64 for updated AIGate / Seedance multi image refs (b64 fallback path)
-            payload["reference_images_b64"] = image_refs
+            # Per updated API docs: reference_images as top-level field.
+            # For Seedance image+audio, reference_images avoids first-frame conflict with input_image.
+            payload["reference_images"] = image_refs
+            if len(image_refs) == 1:
+                payload["input_image_b64"] = image_refs[0]
+            if include_extra_refs:
+                provider_options = payload.setdefault("provider_options", {})
+                provider_options["input_images_b64"] = image_refs
+                provider_options["image_references"] = [
+                    {"tag": f"@Image{index}", "index": index}
+                    for index, _ in enumerate(image_refs, start=1)
+                ]
 
         if video_b64:
-            if video_reference_mode in ("lipsync", "motion_lipsync"):
-                # lipsync / motion+lip-sync: use input_video_b64 so the model can read the original audio track
-                # for precise lip-sync.
+            if is_lipsync:
+                # For lipsync: pass as input_video so model reads the audio track from it.
                 payload["input_video_b64"] = video_b64
             else:
-                # pure motion: reference_videos_b64 for choreography, camera movement, style
-                payload["reference_videos_b64"] = [video_b64]
+                # For motion: reference_videos is top-level per new API docs.
+                payload["reference_videos"] = [video_b64]
 
-        if audio_b64:
+        if audio_b64 and include_extra_refs:
+            # Per updated API docs: input_audio_b64 is a top-level field.
             payload["input_audio_b64"] = audio_b64
-            # input_audio_b64 at top-level per docs symmetry
 
         return payload
 

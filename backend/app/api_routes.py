@@ -1109,9 +1109,8 @@ async def api_generate(request: Request):
                 audio_uploads = [extracted_audio_upload] if not audio_uploads else audio_uploads + [extracted_audio_upload]
                 audio_from_video = True
 
-    # Keep the user's choice for "generate audio in output".
-    # Providing input_audio or extracting audio from video does NOT mean we want silent video.
-    # We still set "audio": true so the final video contains sound (model will use the provided audio reference).
+    final_audio_param = False if (audio_from_video or audio_uploads) else audio
+    audio = final_audio_param
     is_lipsync_mode = video_reference_mode in ("lipsync", "motion_lipsync")
 
     # Do not inject any prompt text for lipsync modes — the user's prompt is used as-is.
@@ -1207,7 +1206,6 @@ async def api_generate(request: Request):
             quality=model_mode,
             seed=seed,
             refs_count=refs_count,
-            video_reference_mode=video_reference_mode,
         )
     )
 
@@ -1243,7 +1241,6 @@ async def run_generation(
     quality: str,
     seed: Optional[int],
     refs_count: int,
-    video_reference_mode: str = "motion",
 ):
     client = AIGateClient(api_key)
     try:
@@ -1272,7 +1269,7 @@ async def run_generation(
             quality=None,
             negative_prompt=negative_prompt,
             seed=seed,
-            video_reference_mode=video_reference_mode,
+            is_lipsync=is_lipsync_mode,
         )
 
         source_url = extract_video_url(result)
