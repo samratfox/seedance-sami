@@ -89,6 +89,12 @@ async def get_or_create_user(init_data: str) -> Dict:
 
     if not user:
         raise HTTPException(status_code=500, detail="Cannot create local user")
+
+    # Access control: admins always pass, everyone else needs is_allowed=1
+    if settings.ADMIN_IDS and telegram_id not in settings.ADMIN_IDS:
+        if not user.get("is_allowed"):
+            raise HTTPException(status_code=403, detail="Access denied")
+
     return user
 
 

@@ -20,6 +20,12 @@ class Database:
 
     async def init(self):
         async with aiosqlite.connect(self.db_path) as db:
+            # Migration: add is_allowed column if upgrading from older schema
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN is_allowed INTEGER NOT NULL DEFAULT 0")
+                await db.commit()
+            except Exception:
+                pass  # Column already exists
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -28,6 +34,7 @@ class Database:
                     username TEXT,
                     full_name TEXT,
                     api_key TEXT,
+                    is_allowed INTEGER NOT NULL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -135,6 +142,27 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("UPDATE users SET api_key = ? WHERE telegram_id = ?", (api_key, telegram_id))
             await db.commit()
+
+    async def set_user_allowed(self, telegram_id: int, allowed: bool):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE users SET is_allowed = ? WHERE telegram_id = ?",
+                (1 if allowed else 0, telegram_id),
+            )
+            await db.commit()
+
+    async def is_user_allowed(self, telegram_id: int) -> bool:
+        user = await self.get_user(telegram_id)
+        if not user:
+            return False
+        return bool(user.get("is_allowed"))
+
+    async def get_all_users(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM users ORDER BY created_at DESC") as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
 
     async def create_generation(
         self,

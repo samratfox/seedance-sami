@@ -187,6 +187,74 @@ async def cb_setkey(callback: CallbackQuery, state: FSMContext):
     )
 
 
+@router.message(Command("allow"))
+async def cmd_allow(message: Message):
+    if not message.from_user or message.from_user.id not in settings.ADMIN_IDS:
+        return
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Использование: /allow <telegram_id или @username>")
+        return
+    arg = parts[1].lstrip("@")
+    user = None
+    if arg.isdigit():
+        user = await db.get_user(int(arg))
+        if user:
+            await db.set_user_allowed(int(arg), True)
+    else:
+        all_users = await db.get_all_users()
+        user = next((u for u in all_users if u.get("username") and u["username"].lower() == arg.lower()), None)
+        if user:
+            await db.set_user_allowed(user["telegram_id"], True)
+    if user:
+        name = user.get("username") or user.get("full_name") or str(user["telegram_id"])
+        await message.answer(f"✅ Доступ открыт: {name}")
+    else:
+        await message.answer("❌ Пользователь не найден. Он должен хотя бы раз открыть бота.")
+
+
+@router.message(Command("deny"))
+async def cmd_deny(message: Message):
+    if not message.from_user or message.from_user.id not in settings.ADMIN_IDS:
+        return
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Использование: /deny <telegram_id или @username>")
+        return
+    arg = parts[1].lstrip("@")
+    user = None
+    if arg.isdigit():
+        user = await db.get_user(int(arg))
+        if user:
+            await db.set_user_allowed(int(arg), False)
+    else:
+        all_users = await db.get_all_users()
+        user = next((u for u in all_users if u.get("username") and u["username"].lower() == arg.lower()), None)
+        if user:
+            await db.set_user_allowed(user["telegram_id"], False)
+    if user:
+        name = user.get("username") or user.get("full_name") or str(user["telegram_id"])
+        await message.answer(f"🚫 Доступ закрыт: {name}")
+    else:
+        await message.answer("❌ Пользователь не найден.")
+
+
+@router.message(Command("users"))
+async def cmd_users(message: Message):
+    if not message.from_user or message.from_user.id not in settings.ADMIN_IDS:
+        return
+    all_users = await db.get_all_users()
+    if not all_users:
+        await message.answer("Нет пользователей.")
+        return
+    lines = []
+    for u in all_users:
+        status = "✅" if u.get("is_allowed") else "🚫"
+        name = f"@{u['username']}" if u.get("username") else u.get("full_name") or "—"
+        lines.append(f"{status} {name} ({u['telegram_id']})")
+    await message.answer("Пользователи:\n" + "\n".join(lines))
+
+
 @router.message(F.text.lower().in_({"отмена", "cancel"}))
 async def universal_cancel(message: Message, state: FSMContext):
     if await state.get_state():
