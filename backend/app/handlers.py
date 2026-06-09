@@ -193,7 +193,7 @@ async def cmd_allow(message: Message):
         return
     parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Использование: /allow <telegram_id или @username>")
+        await message.answer("Использование: /allow 123456789 или /allow @username")
         return
     arg = parts[1].lstrip("@")
     user = None
@@ -219,7 +219,7 @@ async def cmd_deny(message: Message):
         return
     parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Использование: /deny <telegram_id или @username>")
+        await message.answer("Использование: /deny 123456789 или /deny @username")
         return
     arg = parts[1].lstrip("@")
     user = None
