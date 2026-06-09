@@ -1115,9 +1115,16 @@ async def api_generate(request: Request):
                 audio_uploads = [extracted_audio_upload] if not audio_uploads else audio_uploads + [extracted_audio_upload]
                 audio_from_video = True
 
-    final_audio_param = False if (audio_from_video or audio_uploads) else audio
-    audio = final_audio_param
     is_lipsync_mode = video_reference_mode in ("lipsync", "motion_lipsync")
+    # For lipsync: output must have audio=True so the model includes the synced audio track.
+    # For other modes with audio refs: set False to avoid AI-generated audio on top.
+    if is_lipsync_mode:
+        final_audio_param = True
+    elif audio_from_video or audio_uploads:
+        final_audio_param = False
+    else:
+        final_audio_param = audio
+    audio = final_audio_param
 
     # Do not inject any prompt text for lipsync modes — the user's prompt is used as-is.
 
