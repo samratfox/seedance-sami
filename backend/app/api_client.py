@@ -325,13 +325,6 @@ class AIGateClient:
             payload["reference_images"] = image_refs
             if len(image_refs) == 1:
                 payload["input_image"] = image_refs[0]
-            if include_extra_refs:
-                provider_options = payload.setdefault("provider_options", {})
-                provider_options["input_images"] = image_refs
-                provider_options["image_references"] = [
-                    {"tag": f"@Image{index}", "url": url}
-                    for index, url in enumerate(image_refs, start=1)
-                ]
 
         if video_url:
             if is_lipsync:
@@ -344,7 +337,6 @@ class AIGateClient:
         if audio_url and include_extra_refs:
             # Per updated API docs: input_audio / audio_url are top-level fields.
             payload["input_audio"] = audio_url
-            payload["audio_url"] = audio_url
 
         return payload
 
@@ -385,13 +377,6 @@ class AIGateClient:
             payload["reference_images"] = image_refs
             if len(image_refs) == 1:
                 payload["input_image_b64"] = image_refs[0]
-            if include_extra_refs:
-                provider_options = payload.setdefault("provider_options", {})
-                provider_options["input_images_b64"] = image_refs
-                provider_options["image_references"] = [
-                    {"tag": f"@Image{index}", "index": index}
-                    for index, _ in enumerate(image_refs, start=1)
-                ]
 
         if video_b64:
             if is_lipsync:
