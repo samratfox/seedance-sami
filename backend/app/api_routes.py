@@ -1106,7 +1106,6 @@ async def api_generate(request: Request):
     # === FINAL LIPSYNC LOGIC (video as input_video) ===
     extracted_audio_upload = None
     audio_from_video = False
-    video_payload_uploads = video_uploads
 
     if video_uploads and settings.EXTRACT_AUDIO_FROM_VIDEO:
         if video_reference_mode in ("lipsync", "motion_lipsync"):
@@ -1114,6 +1113,14 @@ async def api_generate(request: Request):
             if extracted_audio_upload:
                 audio_uploads = [extracted_audio_upload] if not audio_uploads else audio_uploads + [extracted_audio_upload]
                 audio_from_video = True
+
+    # === ПАТЧ ДЛЯ ИСКЛЮЧЕНИЯ ОШИБКИ 500 (Конфликт payload) ===
+    # Seedance-2.0 крашится, если передать input_image и input_video одновременно.
+    # Если мы оживляем картинку и уже извлекли аудио из видео, видеоряд нужно отсечь.
+    if image_uploads and audio_from_video:
+        use_visual_video = False
+
+    video_payload_uploads = video_uploads if use_visual_video else []
 
     is_lipsync_mode = video_reference_mode in ("lipsync", "motion_lipsync")
     # For lipsync: output must have audio=True so the model includes the synced audio track.
