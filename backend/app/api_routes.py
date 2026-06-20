@@ -165,22 +165,13 @@ async def read_reference_files(files: List[Any]) -> List[tuple]:
 
 
 def public_url(path: str) -> str:
+    """Всегда отдаёт ОТНОСИТЕЛЬНЫЙ URL (/media/...).
+    Фронт на том же домене (Railway) сам подставит домен через absoluteUrl().
+    Для sendPhoto файл читается с диска напрямую (см. _download)."""
     if not path:
         return ""
     if path.startswith(("http://", "https://")):
         return path
-    # Если MEDIA_BASE_URL задан — используем его.
-    # Иначе если WEBAPP_URL — реальный домен (не localhost) — используем его.
-    # Иначе отдаём относительный путь (/media/...) — работает в проде, где
-    # фронт и бэк на одном домене (Railway).
-    base = ""
-    if settings.MEDIA_BASE_URL:
-        base = settings.MEDIA_BASE_URL.rstrip("/")
-    elif settings.WEBAPP_URL and not settings.WEBAPP_URL.startswith("http://localhost"):
-        base = settings.WEBAPP_URL.rstrip("/")
-    if base:
-        return f"{base}{path if path.startswith('/') else f'/{path}'}"
-    # Относительный URL — фронт на том же домене подхватит.
     return path if path.startswith("/") else f"/{path}"
 
 
