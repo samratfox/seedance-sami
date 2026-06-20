@@ -169,8 +169,19 @@ def public_url(path: str) -> str:
         return ""
     if path.startswith(("http://", "https://")):
         return path
-    base = (settings.MEDIA_BASE_URL or settings.WEBAPP_URL).rstrip("/")
-    return f"{base}{path if path.startswith('/') else f'/{path}'}" if base else path
+    # Если MEDIA_BASE_URL задан — используем его.
+    # Иначе если WEBAPP_URL — реальный домен (не localhost) — используем его.
+    # Иначе отдаём относительный путь (/media/...) — работает в проде, где
+    # фронт и бэк на одном домене (Railway).
+    base = ""
+    if settings.MEDIA_BASE_URL:
+        base = settings.MEDIA_BASE_URL.rstrip("/")
+    elif settings.WEBAPP_URL and not settings.WEBAPP_URL.startswith("http://localhost"):
+        base = settings.WEBAPP_URL.rstrip("/")
+    if base:
+        return f"{base}{path if path.startswith('/') else f'/{path}'}"
+    # Относительный URL — фронт на том же домене подхватит.
+    return path if path.startswith("/") else f"/{path}"
 
 
 def images_dir(job_id: str) -> Path:
@@ -655,7 +666,7 @@ async def run_generation(
     )
 
     if status in {"done", "partial"}:
-        await notify_job_done(telegram_id, job_id, prompt, size, quality, done_count, n, all_previews, total_tokens)
+        await notify_job_done(telegram_id, job_id, prompt, size, quality, done_count, n, all_previews, total_tokens, output_format)
     elif status == "failed":
         await notify_job_failed(telegram_id, job_id, prompt, msg)
 
@@ -676,20 +687,34 @@ async def _telegram_post(endpoint: str, data: aiohttp.FormData) -> Dict[str, Any
 
 
 async def _download(url: str) -> bytes:
+    # Если URL относительный (/media/...) — читаем файл с диска (быстрее и надёжнее).
+    if url.startswith("/media/"):
+        path = Path(settings.MEDIA_DIR) / url[len("/media/"):]
+        return await asyncio.to_thread(path.read_bytes)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
         async with session.get(url) as resp:
             resp.raise_for_status()
             return await resp.read()
 
 
-async def notify_job_done(telegram_id, job_id, prompt, size, quality, n_done, n_total, previews, usage_tokens):
+def _ext_for_format(fmt: str) -> str:
+    return fmt if fmt in {"png", "jpeg", "webp"} else "png"
+
+
+def _ctype_for_format(fmt: str) -> str:
+    return {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}.get(fmt, "image/png")
+
+
+async def notify_job_done(telegram_id, job_id, prompt, size, quality, n_done, n_total, previews, usage_tokens, output_format="png"):
     if not settings.BOT_TOKEN or not previews:
         return
+    ext = _ext_for_format(output_format)
+    ctype = _ctype_for_format(output_format)
     try:
         if len(previews) == 1:
             data = aiohttp.FormData()
             data.add_field("chat_id", str(telegram_id))
-            data.add_field("photo", await _download(previews[0]), filename="image.png", content_type="image/png")
+            data.add_field("photo", await _download(previews[0]), filename=f"image.{ext}", content_type=ctype)
             caption = f"🖼 Готово: {n_done}/{n_total}\n{size} · {quality}\nПромпт: {prompt[:200]}"
             data.add_field("caption", caption[:1024])
             await _telegram_post("sendPhoto", data)
@@ -698,8 +723,8 @@ async def notify_job_done(telegram_id, job_id, prompt, size, quality, n_done, n_
             data.add_field("chat_id", str(telegram_id))
             media = []
             for i, url in enumerate(previews[:10]):
-                fname = f"image_{i}.png"
-                data.add_field(fname, await _download(url), filename=fname, content_type="image/png")
+                fname = f"image_{i}.{ext}"
+                data.add_field(fname, await _download(url), filename=fname, content_type=ctype)
                 media.append({"type": "photo", "media": f"attach://{fname}"})
             media[0]["caption"] = f"🖼 Готово: {n_done}/{n_total}\n{size} · {quality}\nТокенов: {usage_tokens}\nПромпт: {prompt[:200]}"
             data.add_field("media", json.dumps(media))
