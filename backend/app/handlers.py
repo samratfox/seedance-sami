@@ -1,4 +1,8 @@
-"""Telegram bot handlers."""
+"""Telegram bot handlers — image MVP с вводом API-ключа (как в оригинале).
+
+Пользователь подключает свой AIGate-ключ (через /setkey или кнопку), генерации
+списываются с его баланса. Общего ключа/лимитов/тарифов пока нет — это позже.
+"""
 
 from __future__ import annotations
 
@@ -24,20 +28,25 @@ async def ensure_user(from_user: User):
     return user
 
 
+def webapp_url() -> str:
+    return settings.WEBAPP_URL or ""
+
+
 async def start_text(from_user: User) -> tuple[str, bool]:
     user = await ensure_user(from_user)
     has_key = bool(user and user.get("api_key"))
-    status = "ключ подключен" if has_key else "ключ ещё не подключен"
+    status = "ключ подключён" if has_key else "ключ ещё не подключён"
     text = (
-        "<b>AIGate Video</b>\n\n"
-        "Это твой интерфейс для генерации видео через AIGate. "
-        "Расход идёт с баланса пользователя, чей API-ключ подключён в боте.\n\n"
+        "<b>sami studio</b>\n\n"
+        "Генерация картинок через <code>gpt-image-2</code>.\n"
+        "Генерации списываются с баланса вашего API-ключа.\n\n"
         f"<b>Статус:</b> {status}\n\n"
         "<b>Как начать:</b>\n"
-        f"1. Зарегистрируйся и пополни баланс: {settings.REFERRAL_URL}\n"
-        "2. Получи API-ключ в кабинете AIGate.\n"
-        "3. Нажми «Подключить API-ключ» или отправь /setkey.\n"
-        "4. Открой генератор и создай видео."
+        "1. Зарегистрируйтесь и пополните баланс на aigate.shop\n"
+        "2. Получите API-ключ в кабинете.\n"
+        "3. Нажмите «Подключить API-ключ» или отправьте /setkey.\n"
+        "4. Откройте «Генератор» и создайте картинку.\n\n"
+        "Готовые фото приходят прямо в этот чат."
     )
     return text, has_key
 
@@ -45,68 +54,32 @@ async def start_text(from_user: User) -> tuple[str, bool]:
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     text, has_key = await start_text(message.from_user)
-    await message.answer(text, reply_markup=kb.main_menu_kb(has_key))
+    await message.answer(text, reply_markup=kb.main_menu_kb(has_key, webapp_url()))
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
         "<b>Команды</b>\n"
-        "/start - главное меню\n"
-        "/setkey - подключить API-ключ AIGate\n"
-        "/profile - баланс и статус ключа\n"
-        "/history - последние генерации\n"
-        "/generate - открыть Mini App"
+        "/start — главное меню\n"
+        "/setkey — подключить API-ключ\n"
+        "/generate — открыть Mini App\n"
+        "/profile — баланс и статус ключа\n"
+        "/history — последние генерации"
     )
 
 
 @router.message(Command("generate"))
 async def cmd_generate(message: Message):
     user = await ensure_user(message.from_user)
+    has_key = bool(user and user.get("api_key"))
+    if not has_key:
+        await message.answer("Сначала подключите API-ключ.", reply_markup=kb.main_menu_kb(False, webapp_url()))
+        return
     await message.answer(
-        "Генерация открывается в Mini App: там удобнее выбирать модель, формат, качество и референсы.",
-        reply_markup=kb.main_menu_kb(bool(user and user.get("api_key"))),
+        "Генератор открывается в Mini App — там выбор размера, качества и количества.",
+        reply_markup=kb.main_menu_kb(has_key, webapp_url()),
     )
-
-
-@router.message(Command("profile"))
-async def cmd_profile(message: Message):
-    user = await ensure_user(message.from_user)
-    if not user or not user.get("api_key"):
-        await message.answer("API-ключ пока не подключён.", reply_markup=kb.profile_kb(False))
-        return
-
-    try:
-        balance = await AIGateClient(user["api_key"]).get_balance()
-        await message.answer(
-            f"<b>Профиль</b>\n\n{format_balance(balance)}",
-            reply_markup=kb.profile_kb(True),
-        )
-    except AIGateError as exc:
-        await message.answer(f"Не удалось получить баланс: {exc}", reply_markup=kb.profile_kb(True))
-
-
-@router.message(Command("history"))
-async def cmd_history(message: Message):
-    await send_history(message, message.from_user)
-
-
-async def send_history(message: Message, from_user: User):
-    await ensure_user(from_user)
-    generations = await db.get_user_generations(from_user.id, 10)
-    if not generations:
-        await message.answer("История пока пустая.", reply_markup=kb.main_menu_kb(False))
-        return
-
-    lines = ["<b>Последние генерации</b>"]
-    icons = {"pending": "ожидает", "processing": "в работе", "completed": "готово", "failed": "ошибка"}
-    for item in generations:
-        status = icons.get(item["status"], item["status"])
-        model = item.get("model") or "model"
-        lines.append(
-            f"#{item['id']} - {status} - {item['duration']}с, {item['resolution']}, {item['ratio']} - {model}"
-        )
-    await message.answer("\n".join(lines), reply_markup=kb.main_menu_kb(True))
 
 
 @router.message(Command("setkey"))
@@ -114,7 +87,7 @@ async def cmd_setkey(message: Message, state: FSMContext):
     await ensure_user(message.from_user)
     await state.set_state(ProfileStates.waiting_api_key)
     await message.answer(
-        "Отправь API-ключ AIGate. Я проверю его через баланс и сохраню только на backend.",
+        "Отправьте API-ключ. Я проверю его через баланс и сохраню только на backend.",
         reply_markup=kb.cancel_kb(),
     )
 
@@ -128,23 +101,81 @@ async def process_key(message: Message, state: FSMContext):
         await cmd_start(message)
         return
 
-    checking = await message.answer("Проверяю ключ...")
+    # Стираем сообщение с ключом из чата сразу — не висит в истории.
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    checking = await message.answer("Проверяю ключ…")
     try:
         balance = await AIGateClient(key).get_balance()
         await db.set_user_api_key(message.from_user.id, key)
-        await checking.edit_text(f"Ключ подключён.\n\n{format_balance(balance)}", reply_markup=kb.profile_kb(True))
+        await checking.edit_text(
+            f"✅ Ключ подключён.\n\n{format_balance(balance)}",
+            reply_markup=kb.profile_kb(True),
+        )
     except AIGateError as exc:
-        await checking.edit_text(f"Ключ не прошёл проверку: {exc}")
+        await checking.edit_text(f"❌ Ключ не прошёл проверку: {exc}")
     finally:
         await state.clear()
         await message.answer("Готово.", reply_markup=kb.remove_kb())
 
 
+@router.message(Command("profile"))
+async def cmd_profile(message: Message):
+    await send_profile(message, message.from_user)
+
+
+async def send_profile(message: Message, from_user: User):
+    user = await ensure_user(from_user)
+    if not user or not user.get("api_key"):
+        await message.answer("API-ключ пока не подключён.", reply_markup=kb.profile_kb(False))
+        return
+    try:
+        balance = await AIGateClient(user["api_key"]).get_balance()
+        await message.answer(f"<b>Профиль</b>\n\n{format_balance(balance)}", reply_markup=kb.profile_kb(True))
+    except AIGateError as exc:
+        await message.answer(f"Не удалось получить баланс: {exc}", reply_markup=kb.profile_kb(True))
+
+
+@router.message(Command("history"))
+async def cmd_history(message: Message):
+    await send_history(message, message.from_user)
+
+
+async def send_history(message: Message, from_user: User):
+    await ensure_user(from_user)
+    jobs = await db.get_user_jobs(from_user.id, 10)
+    has_key = bool((await db.get_user(from_user.id)) or {}).get("api_key")
+    if not jobs:
+        await message.answer("История пока пустая.", reply_markup=kb.main_menu_kb(has_key, webapp_url()))
+        return
+    icons = {"queued": "⏳", "generating": "🔄", "saving": "💾", "done": "✅", "failed": "❌", "partial": "⚠️"}
+    lines = ["<b>Последние генерации</b>"]
+    for j in jobs:
+        icon = icons.get(j["status"], j["status"])
+        lines.append(f"{icon} #{j['id'][:8]} — {j.get('n_done', 0)}/{j.get('n_requested', 0)} · {j.get('size')} · {j.get('quality')}")
+    await message.answer("\n".join(lines), reply_markup=kb.main_menu_kb(has_key, webapp_url()))
+
+
+# ---------------- callbacks ----------------
+
 @router.callback_query(F.data == "main_menu")
 async def cb_main_menu(callback: CallbackQuery):
     await callback.answer()
     text, has_key = await start_text(callback.from_user)
-    await callback.message.edit_text(text, reply_markup=kb.main_menu_kb(has_key))
+    await callback.message.edit_text(text, reply_markup=kb.main_menu_kb(has_key, webapp_url()))
+
+
+@router.callback_query(F.data.in_({"set_key", "change_key"}))
+async def cb_setkey(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(ProfileStates.waiting_api_key)
+    await callback.message.answer(
+        "Отправьте API-ключ.",
+        reply_markup=kb.cancel_kb(),
+    )
 
 
 @router.callback_query(F.data == "profile")
@@ -154,10 +185,11 @@ async def cb_profile(callback: CallbackQuery):
     if not user or not user.get("api_key"):
         await callback.message.edit_text("API-ключ пока не подключён.", reply_markup=kb.profile_kb(False))
         return
-
     try:
         balance = await AIGateClient(user["api_key"]).get_balance()
-        await callback.message.edit_text(f"<b>Профиль</b>\n\n{format_balance(balance)}", reply_markup=kb.profile_kb(True))
+        await callback.message.edit_text(
+            f"<b>Профиль</b>\n\n{format_balance(balance)}", reply_markup=kb.profile_kb(True)
+        )
     except AIGateError as exc:
         await callback.message.edit_text(f"Не удалось получить баланс: {exc}", reply_markup=kb.profile_kb(True))
 
@@ -166,25 +198,26 @@ async def cb_profile(callback: CallbackQuery):
 async def cb_history(callback: CallbackQuery):
     await callback.answer()
     await ensure_user(callback.from_user)
-    generations = await db.get_user_generations(callback.from_user.id, 10)
-    if not generations:
-        await callback.message.edit_text("История пока пустая.", reply_markup=kb.main_menu_kb(True))
+    jobs = await db.get_user_jobs(callback.from_user.id, 10)
+    has_key = bool((await db.get_user(callback.from_user.id)) or {}).get("api_key")
+    if not jobs:
+        await callback.message.edit_text("История пока пустая.", reply_markup=kb.main_menu_kb(has_key, webapp_url()))
         return
-
+    icons = {"queued": "⏳", "generating": "🔄", "saving": "💾", "done": "✅", "failed": "❌", "partial": "⚠️"}
     lines = ["<b>Последние генерации</b>"]
-    for item in generations:
-        lines.append(f"#{item['id']} - {item['status']} - {item['duration']}с / {item['resolution']} / {item['ratio']}")
-    await callback.message.edit_text("\n".join(lines), reply_markup=kb.main_menu_kb(True))
+    for j in jobs:
+        icon = icons.get(j["status"], j["status"])
+        lines.append(f"{icon} #{j['id'][:8]} — {j.get('n_done', 0)}/{j.get('n_requested', 0)} · {j.get('size')} · {j.get('quality')}")
+    await callback.message.edit_text("\n".join(lines), reply_markup=kb.main_menu_kb(has_key, webapp_url()))
 
 
-@router.callback_query(F.data.in_({"set_key", "change_key"}))
-async def cb_setkey(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.set_state(ProfileStates.waiting_api_key)
-    await callback.message.answer(
-        "Отправь новый API-ключ AIGate.",
-        reply_markup=kb.cancel_kb(),
-    )
+# ---------------- admin ----------------
+
+async def _resolve_user(arg: str):
+    if arg.isdigit():
+        return await db.get_user(int(arg))
+    all_users = await db.get_all_users()
+    return next((u for u in all_users if u.get("username") and u["username"].lower() == arg.lower()), None)
 
 
 @router.message(Command("allow"))
@@ -195,18 +228,9 @@ async def cmd_allow(message: Message):
     if len(parts) < 2:
         await message.answer("Использование: /allow 123456789 или /allow @username")
         return
-    arg = parts[1].lstrip("@")
-    user = None
-    if arg.isdigit():
-        user = await db.get_user(int(arg))
-        if user:
-            await db.set_user_allowed(int(arg), True)
-    else:
-        all_users = await db.get_all_users()
-        user = next((u for u in all_users if u.get("username") and u["username"].lower() == arg.lower()), None)
-        if user:
-            await db.set_user_allowed(user["telegram_id"], True)
+    user = await _resolve_user(parts[1].lstrip("@"))
     if user:
+        await db.set_user_allowed(int(user["telegram_id"]), True)
         name = user.get("username") or user.get("full_name") or str(user["telegram_id"])
         await message.answer(f"✅ Доступ открыт: {name}")
     else:
@@ -221,18 +245,9 @@ async def cmd_deny(message: Message):
     if len(parts) < 2:
         await message.answer("Использование: /deny 123456789 или /deny @username")
         return
-    arg = parts[1].lstrip("@")
-    user = None
-    if arg.isdigit():
-        user = await db.get_user(int(arg))
-        if user:
-            await db.set_user_allowed(int(arg), False)
-    else:
-        all_users = await db.get_all_users()
-        user = next((u for u in all_users if u.get("username") and u["username"].lower() == arg.lower()), None)
-        if user:
-            await db.set_user_allowed(user["telegram_id"], False)
+    user = await _resolve_user(parts[1].lstrip("@"))
     if user:
+        await db.set_user_allowed(int(user["telegram_id"]), False)
         name = user.get("username") or user.get("full_name") or str(user["telegram_id"])
         await message.answer(f"🚫 Доступ закрыт: {name}")
     else:
@@ -250,8 +265,9 @@ async def cmd_users(message: Message):
     lines = []
     for u in all_users:
         status = "✅" if u.get("is_allowed") else "🚫"
+        key = "🔑" if u.get("api_key") else "—"
         name = f"@{u['username']}" if u.get("username") else u.get("full_name") or "—"
-        lines.append(f"{status} {name} ({u['telegram_id']})")
+        lines.append(f"{status} {key} {name} ({u['telegram_id']})")
     await message.answer("Пользователи:\n" + "\n".join(lines))
 
 

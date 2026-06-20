@@ -1,9 +1,14 @@
-"""Small WebSocket fan-out for generation progress."""
+"""WebSocket fan-out для прогресса генерации картинок.
+
+Расширение оригинального ConnectionManager: вместо одного прогресса шлём стадии
+queued/estimating/dispatching/generating/saving/done/failed/partial + счётчик
+done/total и опц. массив свежих превью по мере готовности.
+"""
 
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import WebSocket
 from starlette.websockets import WebSocketState
@@ -34,25 +39,35 @@ class ConnectionManager:
     async def send_progress(
         self,
         telegram_id: int,
-        generation_id: int,
-        status: str,
+        job_id: str,
+        stage: str,
         message: str,
         *,
         progress: int = 0,
-        result_url: Optional[str] = None,
+        done_count: int = 0,
+        total_count: int = 0,
+        previews: Optional[List[str]] = None,
+        tokens: Optional[int] = None,
+        cost_rub: Optional[float] = None,
     ):
         sockets = self.connections.get(telegram_id)
         if not sockets:
             return
 
-        payload = {
-            "generation_id": generation_id,
-            "status": status,
+        payload: Dict[str, Any] = {
+            "job_id": job_id,
+            "stage": stage,
             "message": message,
             "progress": max(0, min(progress, 100)),
-            "result_url": result_url,
+            "done_count": done_count,
+            "total_count": total_count,
+            "previews": previews or [],
             "timestamp": time.time(),
         }
+        if tokens is not None:
+            payload["tokens"] = tokens
+        if cost_rub is not None:
+            payload["cost_rub"] = cost_rub
         disconnected: List[WebSocket] = []
 
         for websocket in sockets:

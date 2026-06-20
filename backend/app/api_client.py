@@ -1,10 +1,15 @@
-"""AIGate API client."""
+"""AIGate API client: image generation (gpt-image-2) + balance.
+
+Видео-функционал удалён. Оставлена HTTP-обвязка (_request/AIGateError/get_balance/
+format_balance) — она переиспользуется и для image-генерации, и для проверки
+ключей в пуле. Поверх неё построен GPTImageClient.
+"""
 
 from __future__ import annotations
 
 import logging
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -47,6 +52,8 @@ class AIGateError(Exception):
 
 
 class AIGateClient:
+    """HTTP-обвязка над AIGate-шлюзом. Базовый URL и авторизация — общие."""
+
     def __init__(self, api_key: str):
         self.api_key = api_key.strip()
         self.base_url = settings.PROVIDER_API_BASE.rstrip("/")
@@ -91,346 +98,45 @@ class AIGateClient:
     async def get_balance(self) -> Dict[str, Any]:
         return await self._request("GET", "/balance", timeout=30)
 
-    async def get_video_models(self) -> List[Dict[str, str]]:
-        data = await self._request("GET", "/models", timeout=30)
-        raw_models = data.get("data") or data.get("models") or []
-        video_markers = ("video", "kling", "luma", "runway", "pika", "seedance", "wan", "vidu", "veo")
-        models: List[Dict[str, str]] = []
-
-        for item in raw_models:
-            if isinstance(item, str):
-                model_id = item
-                name = item
-            elif isinstance(item, dict):
-                model_id = str(item.get("id") or "")
-                name = str(item.get("name") or item.get("title") or model_id)
-            else:
-                continue
-
-            haystack = f"{model_id} {name}".lower()
-            if model_id and any(marker in haystack for marker in video_markers):
-                models.append({"id": model_id, "name": name})
-
-        return models
-
-    async def generate_video(
+    async def _request_multipart(
         self,
-        *,
-        model: str,
-        prompt: str,
-        image_urls: Optional[List[str]] = None,
-        images_b64: Optional[List[str]] = None,
-        video_url: Optional[str] = None,
-        video_b64: Optional[str] = None,
-        audio_url: Optional[str] = None,
-        audio_b64: Optional[str] = None,
-        duration: int = 5,
-        resolution: str = "720p",
-        aspect_ratio: str = "16:9",
-        audio: bool = False,
-        quality: Optional[str] = None,
-        negative_prompt: Optional[str] = None,
-        seed: Optional[int] = None,
-        is_lipsync: bool = False,
+        method: str,
+        endpoint: str,
+        form: "aiohttp.FormData",
+        timeout: int = 30,
     ) -> Dict[str, Any]:
-        common = {
-            "model": model,
-            "prompt": prompt,
-            "duration": duration,
-            "resolution": resolution,
-            "aspect_ratio": aspect_ratio,
-            "audio": audio,
-            "quality": quality,
-            "negative_prompt": negative_prompt,
-            "seed": seed,
+        """Запрос с multipart/form-data (для /images/edits с файлами референсов).
+
+        Важно: не задаём Content-Type вручную — aiohttp сам поставит с boundary.
+        """
+        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        # Авторизация через заголовок; Content-Type формирует aiohttp.
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
         }
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.request(method, url, headers=headers, data=form) as resp:
+                try:
+                    data = await resp.json()
+                except Exception:
+                    text = await resp.text()
+                    data = {"error": {"message": text or resp.reason}}
 
-        missing_uploaded_ref_url = bool(
-            (images_b64 and not image_urls)
-            or (video_b64 and not video_url)
-            or (audio_b64 and not audio_url)
-        )
-        use_urls = bool(image_urls or video_url or audio_url) and not missing_uploaded_ref_url
-        payload = self._build_video_payload(
-            use_urls=use_urls,
-            common=common,
-            image_urls=image_urls or [],
-            images_b64=images_b64 or [],
-            video_url=video_url,
-            video_b64=video_b64,
-            audio_url=audio_url,
-            audio_b64=audio_b64,
-            include_extra_refs=True,
-            is_lipsync=is_lipsync,
-        )
-
-        logger.info(
-            "Submitting AIGate video generation: model=%s duration=%s resolution=%s ratio=%s "
-            "image_refs=%s video_ref=%s audio_ref=%s payload_keys=%s prompt=%s",
-            model,
-            duration,
-            resolution,
-            aspect_ratio,
-            len(image_urls or images_b64 or []),
-            bool(video_url or video_b64),
-            bool(audio_url or audio_b64),
-            sorted(payload.keys()),
-            prompt[:240].replace("\n", " "),
-        )
-        try:
-            return await self._request("POST", "/video/generations", timeout=900, json=payload)
-        except AIGateError as exc:
-            if not self._should_retry_with_primary_reference_only(exc, payload, audio_url or audio_b64):
-                raise
-
-            fallback_payload = self._build_video_payload(
-                use_urls=use_urls,
-                common=common,
-                image_urls=image_urls or [],
-                images_b64=images_b64 or [],
-                video_url=video_url,
-                video_b64=video_b64,
-                audio_url=audio_url,
-                audio_b64=audio_b64,
-                include_extra_refs=False,
-                is_lipsync=is_lipsync,
-            )
-            logger.warning(
-                "AIGate rejected extra reference fields, retrying with official primary reference only: "
-                "model=%s status=%s code=%s payload_keys=%s fallback_keys=%s",
-                model,
-                exc.status_code,
-                exc.code,
-                sorted(payload.keys()),
-                sorted(fallback_payload.keys()),
-            )
-            return await self._request("POST", "/video/generations", timeout=900, json=fallback_payload)
-
-    def _build_video_payload(
-        self,
-        *,
-        use_urls: bool,
-        common: Dict[str, Any],
-        image_urls: List[str],
-        images_b64: List[str],
-        video_url: Optional[str],
-        video_b64: Optional[str],
-        audio_url: Optional[str],
-        audio_b64: Optional[str],
-        include_extra_refs: bool,
-        is_lipsync: bool = False,
-    ) -> Dict[str, Any]:
-        if use_urls:
-            return self._video_url_payload(
-                **common,
-                image_urls=image_urls,
-                video_url=video_url,
-                audio_url=audio_url,
-                include_extra_refs=include_extra_refs,
-                is_lipsync=is_lipsync,
-            )
-        return self._video_b64_payload(
-            **common,
-            images_b64=images_b64,
-            video_b64=video_b64,
-            audio_b64=audio_b64,
-            include_extra_refs=include_extra_refs,
-            is_lipsync=is_lipsync,
-        )
-
-    def _should_retry_with_primary_reference_only(
-        self,
-        exc: AIGateError,
-        payload: Dict[str, Any],
-        has_audio_reference: bool,
-    ) -> bool:
-        if settings.STRICT_MULTI_IMAGE_REFERENCES:
-            return False
-        if exc.status_code != 400 or has_audio_reference:
-            return False
-        # reference_images is now a top-level field per updated API docs.
-        top_refs = payload.get("reference_images") or []
-        provider_options = payload.get("provider_options") or {}
-        return bool(top_refs or provider_options.get("input_images"))
-
-    def _base_payload(
-        self,
-        *,
-        model: str,
-        prompt: str,
-        duration: int,
-        resolution: str,
-        aspect_ratio: str,
-        audio: bool,
-        quality: Optional[str],
-        negative_prompt: Optional[str],
-        seed: Optional[int],
-    ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "model": model,
-            "prompt": prompt,
-            "duration": duration,
-            "resolution": resolution,
-            "aspect_ratio": aspect_ratio,
-            "audio": audio,
-            "generate_audio": audio,
-            "n": 1,
-        }
-
-        if quality:
-            payload["quality"] = quality
-
-        if negative_prompt:
-            payload["negative_prompt"] = negative_prompt
-        if seed is not None:
-            payload["seed"] = seed
-
-        return payload
-
-    def _video_url_payload(
-        self,
-        *,
-        model: str,
-        prompt: str,
-        image_urls: List[str],
-        video_url: Optional[str],
-        audio_url: Optional[str],
-        duration: int,
-        resolution: str,
-        aspect_ratio: str,
-        audio: bool,
-        quality: Optional[str],
-        negative_prompt: Optional[str],
-        seed: Optional[int],
-        include_extra_refs: bool,
-        is_lipsync: bool = False,
-    ) -> Dict[str, Any]:
-        payload = self._base_payload(
-            model=model,
-            prompt=prompt,
-            duration=duration,
-            resolution=resolution,
-            aspect_ratio=aspect_ratio,
-            audio=audio,
-            quality=quality,
-            negative_prompt=negative_prompt,
-            seed=seed,
-        )
-
-        if image_urls:
-            image_refs = image_urls[: settings.MAX_IMAGE_REFERENCES]
-            # Per updated API docs: use reference_images as top-level field.
-            # For Seedance image+audio mode, reference_images avoids first-frame conflict.
-            # Keep input_image as fallback for single-image models that don't support reference_images.
-            payload["reference_images"] = image_refs
-            if len(image_refs) == 1:
-                payload["input_image"] = image_refs[0]
-
-        if video_url:
-            if is_lipsync:
-                # For lipsync: pass as input_video — model reads audio from it, not as visual ref.
-                payload["input_video"] = video_url
-            else:
-                # For motion: reference_videos is top-level per new API docs.
-                payload["reference_videos"] = [video_url]
-
-        if audio_url and include_extra_refs:
-            # Per updated API docs: input_audio / audio_url are top-level fields.
-            payload["input_audio"] = audio_url
-
-        return payload
-
-    def _video_b64_payload(
-        self,
-        *,
-        model: str,
-        prompt: str,
-        images_b64: List[str],
-        video_b64: Optional[str],
-        audio_b64: Optional[str],
-        duration: int,
-        resolution: str,
-        aspect_ratio: str,
-        audio: bool,
-        quality: Optional[str],
-        negative_prompt: Optional[str],
-        seed: Optional[int],
-        include_extra_refs: bool,
-        is_lipsync: bool = False,
-    ) -> Dict[str, Any]:
-        payload = self._base_payload(
-            model=model,
-            prompt=prompt,
-            duration=duration,
-            resolution=resolution,
-            aspect_ratio=aspect_ratio,
-            audio=audio,
-            quality=quality,
-            negative_prompt=negative_prompt,
-            seed=seed,
-        )
-
-        if images_b64:
-            image_refs = images_b64[: settings.MAX_IMAGE_REFERENCES]
-            # Per updated API docs: reference_images as top-level field.
-            # For Seedance image+audio, reference_images avoids first-frame conflict with input_image.
-            payload["reference_images"] = image_refs
-            if len(image_refs) == 1:
-                payload["input_image_b64"] = image_refs[0]
-
-        if video_b64:
-            if is_lipsync:
-                # For lipsync: pass as input_video so model reads the audio track from it.
-                payload["input_video_b64"] = video_b64
-            else:
-                # For motion: reference_videos is top-level per new API docs.
-                payload["reference_videos"] = [video_b64]
-
-        if audio_b64 and include_extra_refs:
-            # Per updated API docs: input_audio_b64 is a top-level field.
-            payload["input_audio_b64"] = audio_b64
-
-        return payload
-
-    async def download_video_bytes(self, url: str) -> bytes:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as session:
-            async with session.get(url) as resp:
                 if resp.status >= 400:
-                    raise AIGateError(f"Video download failed: {resp.status}", status_code=resp.status)
-                return await resp.read()
+                    err = data.get("error") if isinstance(data, dict) else None
+                    if isinstance(err, dict):
+                        message = stringify_error(err.get("message") or err.get("type") or err)
+                        code = err.get("code")
+                    else:
+                        message = stringify_error(err or data or "AIGate request failed")
+                        code = None
+                    raise AIGateError(message=message, status_code=resp.status, code=code, payload=data)
 
-
-def extract_video_url(result: Dict[str, Any]) -> Optional[str]:
-    video = result.get("video")
-    if isinstance(video, dict) and video.get("url"):
-        return video["url"]
-    if isinstance(video, str):
-        return video
-
-    outputs = result.get("outputs") or []
-    if outputs and isinstance(outputs[0], str):
-        return outputs[0]
-    if outputs and isinstance(outputs[0], dict) and outputs[0].get("url"):
-        return outputs[0]["url"]
-
-    data_dict = result.get("data")
-    if isinstance(data_dict, dict):
-        nested = extract_video_url(data_dict)
-        if nested:
-            return nested
-
-    videos = result.get("videos") or []
-    if videos and isinstance(videos[0], dict) and videos[0].get("url"):
-        return videos[0]["url"]
-
-    data = result.get("data") or []
-    if data and isinstance(data[0], dict) and data[0].get("url"):
-        return data[0]["url"]
-
-    if result.get("url"):
-        return result["url"]
-
-    return None
+                if not isinstance(data, dict):
+                    raise AIGateError("Unexpected AIGate response format", payload={"response": data})
+                return data
 
 
 def format_balance(data: Dict[str, Any]) -> str:
@@ -447,3 +153,99 @@ def format_balance(data: Dict[str, Any]) -> str:
         parts.append("Безлимитная квота")
 
     return "\n".join(parts) if parts else str(data)
+
+
+# ============================================================
+# Image generation: openai/gpt-image-2 через AIGate-шлюз
+# ============================================================
+
+@dataclass
+class ImageRequest:
+    prompt: str
+    size: str = "1024x1024"
+    quality: str = "medium"            # low|medium|high
+    n: int = 1
+    resolution: Optional[str] = None   # 1k|2k|4k — опц. подсказка из доки AIGate
+    output_format: Optional[str] = None  # png|jpeg|webp — forward модели "when supported"
+    # Референсы «как у официалов»: файлы напрямую (multipart). Порядок = @Image1...
+    reference_images: List[tuple] = field(default_factory=list)  # [(bytes, filename, content_type), ...]
+
+
+@dataclass
+class ImageResult:
+    images_b64: List[str]
+    model: str
+    usage: Dict[str, Any]
+    raw: Dict[str, Any]
+
+
+def _extract_b64(data: Dict[str, Any]) -> List[str]:
+    items = data.get("data") or []
+    out: List[str] = []
+    for item in items:
+        b64 = item.get("b64_json") if isinstance(item, dict) else None
+        out.append(b64 or "")
+    return out
+
+
+class GPTImageClient(AIGateClient):
+    """Генерация картинок через /images/generations и /images/edits."""
+
+    async def generate(self, req: ImageRequest) -> ImageResult:
+        if req.reference_images:
+            return await self._edits(req)
+        return await self._generations(req)
+
+    async def _generations(self, req: ImageRequest) -> ImageResult:
+        payload: Dict[str, Any] = {
+            "model": settings.IMAGE_MODEL,
+            "prompt": req.prompt,
+            "n": req.n,
+            "size": req.size,
+            "quality": req.quality,
+        }
+        if req.resolution:
+            payload["resolution"] = req.resolution
+        if req.output_format:
+            payload["output_format"] = req.output_format
+        data = await self._request("POST", "/images/generations", timeout=settings.GENERATION_TIMEOUT, json=payload)
+        return ImageResult(
+            images_b64=_extract_b64(data),
+            model=settings.IMAGE_MODEL,
+            usage=data.get("usage", {}),
+            raw=data,
+        )
+
+    async def _edits(self, req: ImageRequest) -> ImageResult:
+        """Референсы через /images/edits — multipart с файлами напрямую.
+
+        Порядок reference_images = @Image1, @Image2, ... (как у официалов).
+        """
+        form = aiohttp.FormData()
+        form.add_field("model", settings.IMAGE_MODEL)
+        form.add_field("prompt", req.prompt)
+        form.add_field("n", str(req.n))
+        if req.size:
+            form.add_field("size", req.size)
+        if req.quality:
+            form.add_field("quality", req.quality)
+        if req.resolution:
+            form.add_field("resolution", req.resolution)
+        if req.output_format:
+            form.add_field("output_format", req.output_format)
+
+        refs = req.reference_images[: settings.MAX_REFERENCE_IMAGES]
+        for index, item in enumerate(refs):
+            content, filename, content_type = item
+            # image[] — массив файлов; AIGate/OpenAI-совместимый стиль.
+            form.add_field("image[]", content, filename=filename, content_type=content_type)
+
+        data = await self._request_multipart(
+            "POST", "/images/edits", form, timeout=settings.GENERATION_TIMEOUT
+        )
+        return ImageResult(
+            images_b64=_extract_b64(data),
+            model=settings.IMAGE_MODEL,
+            usage=data.get("usage", {}),
+            raw=data,
+        )

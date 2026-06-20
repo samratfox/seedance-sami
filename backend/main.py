@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
-app = FastAPI(title="AIGate Video Bot API", lifespan=lifespan)
+app = FastAPI(title="GPT Image Bot API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

@@ -2,11 +2,11 @@ const API_BASE = (import.meta.env.VITE_API_URL || window.location.origin).replac
 
 export function getInitData() {
   const tg = window.Telegram?.WebApp;
-  return tg?.initData || import.meta.env.VITE_DEV_INIT_DATA || "";
+  return tg?.initData || import.meta.env.VITE_DEV_INIT_DATA || "dev";
 }
 
 export function isTelegramReady() {
-  return Boolean(window.Telegram?.WebApp?.initData || import.meta.env.VITE_DEV_INIT_DATA);
+  return Boolean(window.Telegram?.WebApp?.initData || import.meta.env.VITE_DEV_INIT_DATA || "dev");
 }
 
 export function absoluteUrl(url) {
@@ -32,11 +32,6 @@ export function errorMessage(value, fallback = "Request failed") {
     if (typeof value.detail === "string") return value.detail;
     if (value.detail) return errorMessage(value.detail, fallback);
     if (typeof value.message === "string") return value.message;
-    if (typeof value.msg === "string") {
-      const loc = Array.isArray(value.loc) ? `${value.loc.join(".")}: ` : "";
-      return `${loc}${value.msg}`;
-    }
-    if (value.error) return errorMessage(value.error, fallback);
     try {
       return JSON.stringify(value, null, 2);
     } catch {
@@ -74,34 +69,22 @@ export async function fetchBalance() {
   return postForm("/api/balance");
 }
 
-export async function submitGeneration({
-  modelMode,
-  prompt,
-  duration,
-  resolution,
-  ratio,
-  audio,
-  videoReferenceMode,
-  negativePrompt,
-  seed,
-  imageFiles,
-  videoFile,
-  audioFile,
-}) {
+export async function estimate({ aspect, size_tier, quality, n }) {
+  return postForm("/api/estimate", { aspect, size_tier, quality, n });
+}
+
+export async function submitGeneration({ prompt, aspect, size_tier, quality, output_format, n, references }) {
   const form = new FormData();
   form.append("init_data", getInitData());
-  form.append("model_mode", modelMode);
   form.append("prompt", prompt);
-  form.append("duration", duration);
-  form.append("resolution", resolution);
-  form.append("ratio", ratio);
-  form.append("audio", audio ? "true" : "false");
-  form.append("video_reference_mode", videoReferenceMode || "motion");
-  if (negativePrompt?.trim()) form.append("negative_prompt", negativePrompt.trim());
-  if (seed !== "" && seed !== null && seed !== undefined) form.append("seed", seed);
-  for (const file of imageFiles) form.append("image_files", file);
-  if (videoFile) form.append("video_file", videoFile);
-  if (audioFile) form.append("audio_file", audioFile);
+  form.append("aspect", aspect);
+  form.append("size_tier", size_tier);
+  form.append("quality", quality);
+  form.append("output_format", output_format);
+  form.append("n", n);
+  if (references && references.length) {
+    for (const file of references) form.append("references", file);
+  }
 
   const response = await fetch(`${API_BASE}/api/generate`, { method: "POST", body: form });
   const payload = await readResponse(response);
@@ -109,21 +92,24 @@ export async function submitGeneration({
   return payload;
 }
 
-export async function fetchHistory(limit = 8) {
+export async function fetchJob(jobId) {
+  return postForm(`/api/jobs/${jobId}`);
+}
+
+export async function cancelJob(jobId) {
+  return postForm(`/api/jobs/${jobId}/cancel`);
+}
+
+export async function fetchHistory(limit = 20) {
   return postForm("/api/history", { limit });
 }
 
-export async function fetchReferenceAssets(limit = 80) {
-  return postForm("/api/reference-assets", { limit });
-}
-
-export async function setApiKey(key) {
-  return postForm("/api/setkey", { api_key: key });
+export async function setApiKey(apiKey) {
+  return postForm("/api/setkey", { api_key: apiKey });
 }
 
 export function connectWebSocket(onMessage) {
   const initData = getInitData();
-  if (!initData) return null;
 
   const protocol = API_BASE.startsWith("https") ? "wss" : "ws";
   const host = API_BASE.replace(/^https?:\/\//, "");
