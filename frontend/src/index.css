@@ -52,6 +52,27 @@ a {
   outline-offset: -2px;
 }
 
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.72);
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 700;
+  text-align: center;
+  pointer-events: none;
+}
+
+.drop-overlay span {
+  border: 2px dashed var(--teal);
+  border-radius: 16px;
+  padding: 24px 32px;
+  background: rgba(27, 26, 24, 0.95);
+}
+
 .topbar {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr) auto;

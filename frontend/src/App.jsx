@@ -35,15 +35,12 @@ export default function App() {
   const [references, setReferences] = useState([]); // массив File; порядок = @Image1..
   const [estimateData, setEstimateData] = useState(null);
   const [estimateLoading, setEstimateLoading] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
-  const [job, setJob] = useState(null);
-  const [progress, setProgress] = useState(null);
-  const [results, setResults] = useState([]);
   const [historyImages, setHistoryImages] = useState([]);
   const [historyJobs, setHistoryJobs] = useState([]);
   const [error, setError] = useState("");
   const [tab, setTab] = useState("generate"); // generate | history
+  // Активные задачи: можно запускать несколько параллельно
+  const [activeJobs, setActiveJobs] = useState({});
   // Экран подключения API-ключа
   const [keyInput, setKeyInput] = useState("");
   const [keyBusy, setKeyBusy] = useState(false);
@@ -71,46 +68,6 @@ export default function App() {
     refreshHistory();
   }, []);
 
-  // global drag-and-drop for reference images
-  useEffect(() => {
-    const handleDragOver = (e) => {
-      e.preventDefault();
-    };
-    const handleDragEnter = (e) => {
-      e.preventDefault();
-      dragCounter.current += 1;
-      if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
-        setDragOver(true);
-      }
-    };
-    const handleDragLeave = (e) => {
-      e.preventDefault();
-      dragCounter.current -= 1;
-      if (dragCounter.current <= 0) {
-        dragCounter.current = 0;
-        setDragOver(false);
-      }
-    };
-    const handleDrop = (e) => {
-      e.preventDefault();
-      dragCounter.current = 0;
-      setDragOver(false);
-      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-        handleAddReferences(e.dataTransfer.files);
-      }
-    };
-    window.addEventListener("dragover", handleDragOver);
-    window.addEventListener("dragenter", handleDragEnter);
-    window.addEventListener("dragleave", handleDragLeave);
-    window.addEventListener("drop", handleDrop);
-    return () => {
-      window.removeEventListener("dragover", handleDragOver);
-      window.removeEventListener("dragenter", handleDragEnter);
-      window.removeEventListener("dragleave", handleDragLeave);
-      window.removeEventListener("drop", handleDrop);
-    };
-  }, [handleAddReferences]);
-
   const refreshBalance = () => fetchBalance().then(setBalance).catch(() => {});
   const refreshHistory = () =>
     fetchHistory(60).then((h) => {
@@ -121,24 +78,27 @@ export default function App() {
   // WebSocket
   useEffect(() => {
     wsRef.current = connectWebSocket((msg) => {
-      if (job && msg.job_id !== job.job_id) return;
-      setProgress(msg);
-      if (msg.previews && msg.previews.length) {
-        setResults((prev) => {
-          const set = new Set(prev);
+      setActiveJobs((prev) => {
+        const jobId = msg.job_id;
+        if (!prev[jobId]) return prev;
+        const next = { ...prev };
+        const current = next[jobId];
+        next[jobId] = { ...current, progress: msg };
+        if (msg.previews && msg.previews.length) {
+          const set = new Set(current.results || []);
           msg.previews.forEach((p) => set.add(p));
-          return Array.from(set);
-        });
-      }
-      if (["done", "failed", "partial", "cancelled"].includes(msg.stage)) {
-        setBusy(false);
-        setCancelling(false);
-        refreshHistory();
-        refreshBalance();   // показать изменившийся баланс
-      }
+          next[jobId] = { ...next[jobId], results: Array.from(set) };
+        }
+        if (["done", "failed", "partial", "cancelled"].includes(msg.stage)) {
+          next[jobId] = { ...next[jobId], cancelling: false };
+          refreshHistory();
+          refreshBalance();   // показать изменившийся баланс
+        }
+        return next;
+      });
     });
     return () => wsRef.current && wsRef.current.close();
-  }, [job]);
+  }, []);
 
   // live estimate
   useEffect(() => {
@@ -165,16 +125,14 @@ export default function App() {
       setError("Введите промпт");
       return;
     }
-    setBusy(true);
-    setCancelling(false);
-    setResults([]);
-    setProgress(null);
     try {
       const res = await submitGeneration({ prompt, aspect, size_tier: sizeTier, quality, output_format: outputFormat, n, references });
-      setJob(res);
+      setActiveJobs((prev) => ({
+        ...prev,
+        [res.job_id]: { job: res, progress: null, results: [], cancelling: false },
+      }));
     } catch (e) {
       setError(errorMessage(e));
-      setBusy(false);
     }
   }, [prompt, aspect, sizeTier, quality, outputFormat, n, references]);
 
@@ -185,20 +143,73 @@ export default function App() {
     setReferences((prev) => [...prev, ...arr].slice(0, maxRefs));
   }, [maxRefs]);
 
+  const handleDragEnter = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current += 1;
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setDragOver(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current -= 1;
+    if (dragCounter.current <= 0) {
+      dragCounter.current = 0;
+      setDragOver(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current = 0;
+    setDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleAddReferences(e.dataTransfer.files);
+    }
+  }, [handleAddReferences]);
+
   const handleRemoveReference = useCallback((index) => {
     setReferences((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
-  const handleCancel = useCallback(async () => {
-    if (!job?.job_id) return;
-    setCancelling(true);
+  const handleCancel = useCallback(async (jobId) => {
+    if (!jobId) return;
+    setActiveJobs((prev) => {
+      if (!prev[jobId]) return prev;
+      return { ...prev, [jobId]: { ...prev[jobId], cancelling: true } };
+    });
     try {
-      await cancelJob(job.job_id);
+      await cancelJob(jobId);
     } catch (e) {
       setError(errorMessage(e));
-      setCancelling(false);
+      setActiveJobs((prev) => {
+        if (!prev[jobId]) return prev;
+        return { ...prev, [jobId]: { ...prev[jobId], cancelling: false } };
+      });
     }
-  }, [job]);
+  }, []);
+
+  const handleClearFinished = useCallback(() => {
+    setActiveJobs((prev) => {
+      const next = {};
+      for (const [jobId, data] of Object.entries(prev)) {
+        const stage = data.progress?.stage;
+        if (!stage || !["done", "failed", "partial", "cancelled"].includes(stage)) {
+          next[jobId] = data;
+        }
+      }
+      return next;
+    });
+  }, []);
 
   const handleSetKey = useCallback(async () => {
     setKeyError("");
@@ -221,7 +232,6 @@ export default function App() {
   }, [keyInput]);
 
   const hasKey = Boolean(balance?.has_key);
-  const progressPct = progress?.progress ?? 0;
 
   // навигация в просмотрщике
   const goViewer = useCallback((delta) => {
@@ -245,7 +255,18 @@ export default function App() {
   }, [viewer, goViewer]);
 
   return (
-    <div className={"app-shell" + (dragOver ? " drag-over" : "")}>
+    <div
+      className={"app-shell" + (dragOver ? " drag-over" : "")}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {dragOver && (
+        <div className="drop-overlay">
+          <span>📎 Отпустите фото, чтобы добавить референс</span>
+        </div>
+      )}
       <TopBar balance={balance} config={config} />
 
       <div className="tabs">
@@ -358,39 +379,24 @@ export default function App() {
           <EstimateBar data={estimateData} loading={estimateLoading} />
 
           <div className="btn-row">
-            <button className="btn primary" disabled={busy || !prompt.trim()} onClick={handleGenerate}>
-              {busy ? "Генерация…" : "Сгенерировать"}
+            <button className="btn primary" disabled={!prompt.trim()} onClick={handleGenerate}>
+              Сгенерировать
             </button>
-            {busy && (
-              <button
-                className="btn ghost"
-                disabled={cancelling}
-                onClick={handleCancel}
-              >
-                {cancelling ? "Отменяю…" : "Отменить"}
+            {Object.values(activeJobs).some((d) => ["done", "failed", "partial", "cancelled"].includes(d.progress?.stage)) && (
+              <button className="btn ghost" onClick={handleClearFinished}>
+                Очистить завершённые
               </button>
             )}
           </div>
 
-          {progress && (
-            <div className={"progress-block" + (busy ? " is-active" : "")}>
-              <div className="progress-head">
-                <span>{STAGE_LABEL[progress.stage] || progress.stage}</span>
-                <span>{progress.done_count}/{progress.total_count}</span>
-              </div>
-              <div className="progress-bar">
-                <div className="progress-fill" style={{ width: `${progressPct}%` }} />
-              </div>
-              <div className="hint">{progress.message}</div>
-            </div>
-          )}
-
-          {busy && (
-            <ResultsGrid total={n} ready={results} />
-          )}
-          {!busy && results.length > 0 && (
-            <ResultsGrid total={results.length} ready={results} />
-          )}
+          {Object.entries(activeJobs).map(([jobId, data]) => (
+            <JobProgress
+              key={jobId}
+              jobId={jobId}
+              data={data}
+              onCancel={handleCancel}
+            />
+          ))}
         </div>
       )}
 
@@ -416,8 +422,21 @@ function ReferenceUploader({ references, maxRefs, onAdd, onRemove }) {
     return () => urls.forEach((u) => URL.revokeObjectURL(u));
   }, [references]);
 
+  const handleUploaderDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      onAdd(e.dataTransfer.files);
+    }
+  };
+
+  const handleUploaderDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
   return (
-    <div className="ref-uploader">
+    <div className="ref-uploader" onDrop={handleUploaderDrop} onDragOver={handleUploaderDragOver}>
       <div className="ref-grid">
         {previews.map((url, i) => (
           <div key={i} className="ref-cell">
@@ -747,6 +766,36 @@ function Viewer({ images, index, onClose, onNav }) {
           <div className="viewer-prompt">{img.prompt}</div>
         </div>
       )}
+    </div>
+  );
+}
+
+function JobProgress({ jobId, data, onCancel }) {
+  const { job, progress, results, cancelling } = data;
+  const total = job?.n || progress?.total_count || results.length || 1;
+  const done = progress?.done_count || results.length;
+  const stage = progress?.stage || "queued";
+  const isFinal = ["done", "failed", "partial", "cancelled"].includes(stage);
+  const progressPct = progress?.progress ?? (results.length / total * 100);
+
+  return (
+    <div className={"progress-block" + (isFinal ? "" : " is-active")}>
+      <div className="progress-head">
+        <span>{STAGE_LABEL[stage] || stage}</span>
+        <span>{done}/{total}</span>
+      </div>
+      <div className="progress-bar">
+        <div className="progress-fill" style={{ width: `${progressPct}%` }} />
+      </div>
+      <div className="hint">{progress?.message || "В очереди…"}</div>
+      {!isFinal && (
+        <div className="btn-row" style={{ marginTop: 8 }}>
+          <button className="btn ghost" disabled={cancelling} onClick={() => onCancel(jobId)}>
+            {cancelling ? "Отменяю…" : "Отменить"}
+          </button>
+        </div>
+      )}
+      {results.length > 0 && <ResultsGrid total={total} ready={results} />}
     </div>
   );
 }

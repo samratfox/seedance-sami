@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     DEFAULT_SIZE_TIER: str = "standard"        # standard | 2k | max — уровень размера
     MAX_PROMPT_LENGTH: int = 16000             # gpt-image-2 принимает длинные промпты (было 3500)
     MAX_UPLOAD_MB: int = 16
-    MAX_N_PER_CALL: int = 10                   # лимит n за один вызов; дока не указывает — проверить
+    MAX_N_PER_CALL: int = 16                   # лимит n за один вызов
     MAX_REFERENCE_IMAGES: int = 16             # дока: "one or more" без верха — проверить
     MAX_IMAGE_LONG_EDGE: int = 3840            # лимит AIGate: длинная сторона ≤ 3840px
     MIN_IMAGE_SHORT_EDGE: int = 768            # лимит AIGate: короткая сторона ≥ ~720px
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # === Чанкование батча (механика «как в Runway») ===
     CHUNK_SIZE: int = 4                       # картинок в одном чанке (запросе к AIGate)
-    CHUNK_CONCURRENCY: int = 2                # сколько чанков идёт параллельно
+    CHUNK_CONCURRENCY: int = 4                # сколько чанков идёт параллельно
 
     # === Валюта: курс USD→RUB для отображения цен в рублях ===
     USD_TO_RUB: float = 92.0                  # актуальный курс; меняй в .env
