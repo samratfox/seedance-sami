@@ -118,3 +118,20 @@ export function connectWebSocket(onMessage) {
   websocket.onerror = (event) => console.error("WebSocket error", event);
   return websocket;
 }
+
+export async function downloadUrl(url, filename = "image.png") {
+  const response = await fetch(absoluteUrl(url));
+  if (!response.ok) {
+    throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+  }
+  const blob = await response.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+}

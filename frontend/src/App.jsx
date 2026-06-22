@@ -3,12 +3,12 @@ import {
   absoluteUrl,
   cancelJob,
   connectWebSocket,
+  downloadUrl,
   errorMessage,
   estimate,
   fetchBalance,
   fetchConfig,
   fetchHistory,
-  fetchJob,
   setApiKey,
   submitGeneration,
 } from "./api";
@@ -51,11 +51,10 @@ export default function App() {
   const [keyOk, setKeyOk] = useState("");
   // Просмотр картинки из истории
   const [viewer, setViewer] = useState(null); // {images, index}
-  // Drag-and-drop референсов в окно приложения
   const [dragOver, setDragOver] = useState(false);
   const wsRef = useRef(null);
   const estimateTimer = useRef(null);
-  const jobRef = useRef(null);   // текущая задача — для фильтрации WS-сообщений
+  const dragCounter = useRef(0);
 
   // init
   useEffect(() => {
@@ -72,6 +71,46 @@ export default function App() {
     refreshHistory();
   }, []);
 
+  // global drag-and-drop for reference images
+  useEffect(() => {
+    const handleDragOver = (e) => {
+      e.preventDefault();
+    };
+    const handleDragEnter = (e) => {
+      e.preventDefault();
+      dragCounter.current += 1;
+      if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+        setDragOver(true);
+      }
+    };
+    const handleDragLeave = (e) => {
+      e.preventDefault();
+      dragCounter.current -= 1;
+      if (dragCounter.current <= 0) {
+        dragCounter.current = 0;
+        setDragOver(false);
+      }
+    };
+    const handleDrop = (e) => {
+      e.preventDefault();
+      dragCounter.current = 0;
+      setDragOver(false);
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        handleAddReferences(e.dataTransfer.files);
+      }
+    };
+    window.addEventListener("dragover", handleDragOver);
+    window.addEventListener("dragenter", handleDragEnter);
+    window.addEventListener("dragleave", handleDragLeave);
+    window.addEventListener("drop", handleDrop);
+    return () => {
+      window.removeEventListener("dragover", handleDragOver);
+      window.removeEventListener("dragenter", handleDragEnter);
+      window.removeEventListener("dragleave", handleDragLeave);
+      window.removeEventListener("drop", handleDrop);
+    };
+  }, [handleAddReferences]);
+
   const refreshBalance = () => fetchBalance().then(setBalance).catch(() => {});
   const refreshHistory = () =>
     fetchHistory(60).then((h) => {
@@ -79,21 +118,10 @@ export default function App() {
       setHistoryJobs(h.jobs || []);
     }).catch(() => {});
 
-  // Держим jobRef в актуальном состоянии — WS-хендлер читает его, чтобы фильтровать
-  // сообщения по job_id без пересоздания соединения.
-  useEffect(() => { jobRef.current = job; }, [job]);
-
-  // WebSocket: одно соединение на весь сеанс + авто-реконнект. Раньше пересоздавалось
-  // при каждой смене job — из-за этого терялись сообщения (включая финальные превью),
-  // и картинки «иногда не появлялись».
+  // WebSocket
   useEffect(() => {
-    let ws = null;
-    let reconnectTimer = null;
-    let stopped = false;
-
-    const onMessage = (msg) => {
-      const cur = jobRef.current;
-      if (cur && msg.job_id !== cur.job_id) return;
+    wsRef.current = connectWebSocket((msg) => {
+      if (job && msg.job_id !== job.job_id) return;
       setProgress(msg);
       if (msg.previews && msg.previews.length) {
         setResults((prev) => {
@@ -107,67 +135,10 @@ export default function App() {
         setCancelling(false);
         refreshHistory();
         refreshBalance();   // показать изменившийся баланс
-        // Подстраховка: достаём авторитетный список картинок из БД — на случай,
-        // если какие-то превью по WebSocket не дошли.
-        if (cur && msg.job_id === cur.job_id) {
-          fetchJob(cur.job_id)
-            .then((data) => {
-              if (data?.images?.length) {
-                setResults(data.images.map((img) => absoluteUrl(img.url)));
-              }
-            })
-            .catch(() => {});
-        }
       }
-    };
-
-    const connect = () => {
-      if (stopped) return;
-      ws = connectWebSocket(onMessage);
-      wsRef.current = ws;
-      ws.onclose = () => {
-        if (!stopped) reconnectTimer = setTimeout(connect, 1500);
-      };
-    };
-    connect();
-
-    return () => {
-      stopped = true;
-      clearTimeout(reconnectTimer);
-      if (ws) ws.close();
-    };
-  }, []);
-
-  // Подстраховка WebSocket: пока идёт генерация, периодически опрашиваем статус
-  // задачи и подтягиваем готовые картинки из БД. Покрывает потерянные WS-сообщения
-  // и обрывы соединения.
-  useEffect(() => {
-    if (!job || !busy) return;
-    const id = setInterval(() => {
-      fetchJob(job.job_id)
-        .then((data) => {
-          if (data?.images?.length) {
-            setResults((prev) => {
-              const set = new Set(prev);
-              data.images.forEach((img) => set.add(absoluteUrl(img.url)));
-              return Array.from(set);
-            });
-          }
-          const j = data?.job;
-          if (j && ["done", "failed", "partial", "cancelled"].includes(j.status)) {
-            setBusy(false);
-            setCancelling(false);
-            if (data?.images?.length) {
-              setResults(data.images.map((img) => absoluteUrl(img.url)));
-            }
-            refreshHistory();
-            refreshBalance();
-          }
-        })
-        .catch(() => {});
-    }, 2500);
-    return () => clearInterval(id);
-  }, [job, busy]);
+    });
+    return () => wsRef.current && wsRef.current.close();
+  }, [job]);
 
   // live estimate
   useEffect(() => {
@@ -274,32 +245,8 @@ export default function App() {
   }, [viewer, goViewer]);
 
   return (
-    <div
-      className={"app-shell" + (dragOver ? " drag-over" : "")}
-      onDragOver={(e) => {
-        if (e.dataTransfer.types.includes("Files")) {
-          e.preventDefault();
-          setDragOver(true);
-        }
-      }}
-      onDragLeave={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget)) setDragOver(false);
-      }}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragOver(false);
-        if (hasKey) handleAddReferences(e.dataTransfer.files);
-      }}
-    >
+    <div className={"app-shell" + (dragOver ? " drag-over" : "")}>
       <TopBar balance={balance} config={config} />
-
-      {dragOver && (
-        <div className="drop-overlay">
-          <div className="drop-overlay-inner">
-            {hasKey ? "Отпусти — добавлю как референсы" : "Сначала подключи API-ключ"}
-          </div>
-        </div>
-      )}
 
       <div className="tabs">
         <button className={tab === "generate" ? "tab active" : "tab"} onClick={() => setTab("generate")}>Генерация</button>
@@ -332,7 +279,7 @@ export default function App() {
           <div className="field">
             <span className="field-label">Соотношение сторон</span>
             <div className="aspect-pills">
-              {(config?.aspects || ["1:1", "9:16", "16:9", "4:3", "3:4", "4:5", "3:2", "2:3"]).map((a) => (
+              {(config?.aspects || ["1:1", "9:16", "16:9", "4:3", "3:4", "3:2", "2:3"]).map((a) => (
                 <button
                   key={a}
                   type="button"
@@ -763,33 +710,6 @@ function HistoryPanel({ images, jobs, onOpen }) {
   );
 }
 
-async function downloadImage(url, filename) {
-  const abs = absoluteUrl(url);
-  // Пробуем скачать блобом — обходит ограничение download-атрибута для
-  // кросс-доменных картинок (веб-апп и медиа могут быть на разных доменах).
-  try {
-    const resp = await fetch(abs);
-    if (resp.ok) {
-      const blob = await resp.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
-      return;
-    }
-  } catch {
-    /* CORS или обрыв — ниже fallback */
-  }
-  // Fallback: открыть во внешнем браузере (в Telegram — через openLink).
-  const tg = window.Telegram?.WebApp;
-  if (tg?.openLink) tg.openLink(abs);
-  else window.open(abs, "_blank");
-}
-
 function Viewer({ images, index, onClose, onNav }) {
   const img = images[index];
   if (!img) return null;
@@ -797,16 +717,23 @@ function Viewer({ images, index, onClose, onNav }) {
     <div className="viewer" onClick={onClose}>
       <div className="viewer-bar" onClick={(e) => e.stopPropagation()}>
         <span className="viewer-info">{index + 1} / {images.length}</span>
-        <button
-          className="btn small"
-          onClick={(e) => {
-            e.stopPropagation();
-            const ext = (absoluteUrl(img.url).split("?")[0].split(".").pop() || "png").toLowerCase();
-            downloadImage(img.url, `sami-${Date.now()}.${ext}`);
-          }}
-        >
-          ↓ Скачать
-        </button>
+          <a
+            className="btn small"
+            href={absoluteUrl(img.url)}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const filename = (img.url && img.url.split("/").pop()) || `image-${index + 1}.png`;
+              downloadUrl(img.url, filename).catch((err) => {
+                console.error("Download failed", err);
+                window.open(absoluteUrl(img.url), "_blank");
+              });
+            }}
+          >
+            ↓ Скачать
+          </a>
         <button className="btn small" onClick={onClose}>✕</button>
       </div>
       <div className="viewer-stage" onClick={(e) => e.stopPropagation()}>

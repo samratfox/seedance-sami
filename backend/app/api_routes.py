@@ -164,12 +164,14 @@ async def read_reference_files(files: List[Any]) -> List[tuple]:
 
 
 def public_url(path: str) -> str:
+    """Всегда отдаёт ОТНОСИТЕЛЬНЫЙ URL (/media/...).
+    Фронт на том же домене (Railway) сам подставит домен через absoluteUrl().
+    Для sendPhoto файл читается с диска напрямую (см. _download)."""
     if not path:
         return ""
     if path.startswith(("http://", "https://")):
         return path
-    base = (settings.MEDIA_BASE_URL or settings.WEBAPP_URL).rstrip("/")
-    return f"{base}{path if path.startswith('/') else f'/{path}'}" if base else path
+    return path if path.startswith("/") else f"/{path}"
 
 
 def images_dir(job_id: str) -> Path:
@@ -319,7 +321,6 @@ async def api_generate(request: Request):
         raise HTTPException(status_code=400, detail=f"За один запуск до {settings.MAX_N_PER_CALL} картинок")
 
     # Референсы (порядок = @Image1, @Image2, ...). Читаем в память.
-    # Промпт отправляем как есть — без авто-дописывания инструкций модели.
     references = await read_reference_files(reference_files)
 
     est = estimate(size, quality, n)
@@ -480,7 +481,6 @@ async def run_generation(
     # shared mutable state
     state = {"done": 0, "tokens": 0, "failed": 0}
     all_previews: List[str] = []
-    all_local_files: List[Path] = []   # пути на диске — для отправки в чат бота
     chunk_errors: List[str] = []
 
     async def run_chunk(start_index: int, chunk_size: int) -> str:
@@ -513,7 +513,6 @@ async def run_generation(
 
                     job_dir = images_dir(job_id)
                     chunk_previews: List[str] = []
-                    chunk_paths: List[Path] = []
                     for offset, b64 in enumerate(images_b64):
                         global_idx = start_index + offset + 1
                         content = base64.b64decode(b64)
@@ -523,7 +522,6 @@ async def run_generation(
                         relative = path.relative_to(Path(settings.MEDIA_DIR)).as_posix()
                         await db.add_image(job_id, relative, len(content))
                         chunk_previews.append(public_url(f"/media/{relative}"))
-                        chunk_paths.append(path)
 
                     tokens = int((result.usage or {}).get("total_tokens", 0))
                     cost_usd_chunk = float((result.usage or {}).get("cost_usd", 0) or 0)
@@ -532,7 +530,6 @@ async def run_generation(
                     state["tokens"] += tokens
                     state["cost_usd"] = state.get("cost_usd", 0.0) + cost_usd_chunk
                     all_previews.extend(chunk_previews)
-                    all_local_files.extend(chunk_paths)
 
                     pct = int(state["done"] / n * 100) if n else 100
                     await manager.send_progress(
@@ -646,7 +643,7 @@ async def run_generation(
     )
 
     if status in {"done", "partial"}:
-        await notify_job_done(telegram_id, job_id, prompt, size, quality, done_count, n, all_local_files, total_tokens)
+        await notify_job_done(telegram_id, job_id, prompt, size, quality, done_count, n, all_previews, total_tokens, output_format)
     elif status == "failed":
         await notify_job_failed(telegram_id, job_id, prompt, msg)
 
@@ -655,9 +652,9 @@ async def run_generation(
 # Уведомления в чат бота (фото + текст через Telegram Bot API)
 # ============================================================
 
-async def _telegram_post(endpoint: str, data: aiohttp.FormData) -> Dict[str, Any]:
+async def _telegram_post(endpoint: str, data: aiohttp.FormData, timeout_seconds: int = 60) -> Dict[str, Any]:
     url = f"https://api.telegram.org/bot{settings.BOT_TOKEN}/{endpoint}"
-    timeout = aiohttp.ClientTimeout(total=60)
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, data=data) as resp:
             payload = await resp.json(content_type=None)
@@ -666,48 +663,127 @@ async def _telegram_post(endpoint: str, data: aiohttp.FormData) -> Dict[str, Any
             return payload
 
 
-async def _read_image(path: Path) -> tuple:
-    """Читает файл картинки с диска (в отдельном потоке, чтобы не блокировать
-    event-loop). Возвращает (bytes, content_type, ext)."""
-    content = await asyncio.to_thread(path.read_bytes)
-    ext = (path.suffix.lstrip(".") or "png").lower()
-    content_type = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
-    return content, content_type, ext
+async def _download(url: str) -> bytes:
+    # Если URL относительный (/media/...) — читаем файл с диска (быстрее и надёжнее).
+    if url.startswith("/media/"):
+        path = Path(settings.MEDIA_DIR) / url[len("/media/"):]
+        return await asyncio.to_thread(path.read_bytes)
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            return await resp.read()
 
 
-async def notify_job_done(telegram_id, job_id, prompt, size, quality, n_done, n_total, image_paths, usage_tokens):
-    """Отправляет готовые картинки в чат бота.
+def _ext_for_format(fmt: str) -> str:
+    return fmt if fmt in {"png", "jpeg", "webp"} else "png"
 
-    Читает файлы с диска напрямую — не зависит от MEDIA_BASE_URL/WEBAPP_URL и
-    HTTP-доступности медиа. Раньше качала по public_url, что ломалось, когда база
-    ссылок указывала не на бэкенд (например, на фронтенд). Порядок image_paths
-    сохраняется = @Image1, @Image2…
-    """
-    if not settings.BOT_TOKEN or not image_paths:
+
+def _ctype_for_format(fmt: str) -> str:
+    return {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}.get(fmt, "image/png")
+
+
+async def notify_job_done(telegram_id, job_id, prompt, size, quality, n_done, n_total, previews, usage_tokens, output_format="png"):
+    if not settings.BOT_TOKEN or not previews:
         return
+
+    ext = _ext_for_format(output_format)
+    ctype = _ctype_for_format(output_format)
+    chat_id = str(telegram_id)
+
+    caption = f"🖼 Готово: {n_done}/{n_total}\n{size} · {quality}\nТокенов: {usage_tokens}\nПромпт: {prompt[:200]}"
+    single_caption = f"🖼 Готово: {n_done}/{n_total}\n{size} · {quality}\nПромпт: {prompt[:200]}"
+
+    async def _post_photo(photo_bytes, caption_text):
+        data = aiohttp.FormData()
+        data.add_field("chat_id", chat_id)
+        data.add_field("photo", photo_bytes, filename=f"image.{ext}", content_type=ctype)
+        if caption_text:
+            data.add_field("caption", caption_text[:1024])
+        payload = await _telegram_post("sendPhoto", data, timeout_seconds=180)
+        if not payload.get("ok"):
+            raise Exception(f"Telegram sendPhoto failed: {payload}")
+
+    async def _post_group(photo_bytes_list):
+        data = aiohttp.FormData()
+        data.add_field("chat_id", chat_id)
+        media = []
+        for i, b in enumerate(photo_bytes_list):
+            fname = f"image_{i}.{ext}"
+            data.add_field(fname, b, filename=fname, content_type=ctype)
+            media.append({"type": "photo", "media": f"attach://{fname}"})
+        media[0]["caption"] = caption[:1024]
+        data.add_field("media", json.dumps(media))
+        payload = await _telegram_post("sendMediaGroup", data, timeout_seconds=180)
+        if not payload.get("ok"):
+            raise Exception(f"Telegram sendMediaGroup failed: {payload}")
+
+    async def _post_text(text):
+        data = aiohttp.FormData()
+        data.add_field("chat_id", chat_id)
+        data.add_field("text", text)
+        payload = await _telegram_post("sendMessage", data, timeout_seconds=60)
+        if not payload.get("ok"):
+            raise Exception(f"Telegram sendMessage failed: {payload}")
+
+    # Preload images from disk (max 10 for Telegram media group limit)
+    images = []
+    for p in previews[:10]:
+        try:
+            images.append(await _download(p))
+        except Exception as exc:
+            logger.warning("Failed to download preview %s for job %s: %s", p, job_id, exc)
+            images.append(None)
+
+    last_error = None
     try:
-        if len(image_paths) == 1:
-            content, ctype, ext = await _read_image(image_paths[0])
-            data = aiohttp.FormData()
-            data.add_field("chat_id", str(telegram_id))
-            data.add_field("photo", content, filename=f"image.{ext}", content_type=ctype)
-            caption = f"🖼 Готово: {n_done}/{n_total}\n{size} · {quality}\nПромпт: {prompt[:200]}"
-            data.add_field("caption", caption[:1024])
-            await _telegram_post("sendPhoto", data)
-        else:
-            data = aiohttp.FormData()
-            data.add_field("chat_id", str(telegram_id))
-            media = []
-            for i, p in enumerate(image_paths[:10]):
-                content, ctype, ext = await _read_image(p)
-                fname = f"image_{i}.{ext}"
-                data.add_field(fname, content, filename=fname, content_type=ctype)
-                media.append({"type": "photo", "media": f"attach://{fname}"})
-            media[0]["caption"] = f"🖼 Готово: {n_done}/{n_total}\n{size} · {quality}\nТокенов: {usage_tokens}\nПромпт: {prompt[:200]}"
-            data.add_field("media", json.dumps(media))
-            await _telegram_post("sendMediaGroup", data)
-    except Exception:
-        logger.exception("notify_job_done failed for %s", job_id)
+        if len(previews) == 1:
+            photo_bytes = images[0]
+            for attempt in range(2):
+                if photo_bytes is None:
+                    break
+                try:
+                    await _post_photo(photo_bytes, single_caption)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning("sendPhoto attempt %s failed for job %s: %s", attempt + 1, job_id, exc)
+                    if attempt == 0:
+                        await asyncio.sleep(1.5)
+
+        elif all(b is not None for b in images):
+            for attempt in range(2):
+                try:
+                    await _post_group(images)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning("sendMediaGroup attempt %s failed for job %s: %s", attempt + 1, job_id, exc)
+                    if attempt == 0:
+                        await asyncio.sleep(1.5)
+
+        # Fallback: send each image individually
+        sent_any = False
+        for i, photo_bytes in enumerate(images):
+            if photo_bytes is None:
+                continue
+            try:
+                await _post_photo(photo_bytes, single_caption if not sent_any else "")
+                sent_any = True
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Individual sendPhoto failed for job %s preview %s: %s", job_id, i, exc)
+
+        if sent_any:
+            return
+
+        # Final fallback: text message with a link to the Mini App
+        logger.warning("All media send attempts failed for job %s, sending text fallback", job_id)
+        await _post_text(
+            f"🖼 Готово: {n_done}/{n_total}\n{size} · {quality}\nТокенов: {usage_tokens}\nПромпт: {prompt[:200]}\n\n"
+            f"Результаты доступны в Mini App (задача #{job_id[:8]})."
+        )
+    except Exception as exc:
+        logger.exception("notify_job_done failed for job %s", job_id)
 
 
 async def notify_job_failed(telegram_id, job_id, prompt, error):
