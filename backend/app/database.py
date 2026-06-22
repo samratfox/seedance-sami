@@ -56,6 +56,8 @@ class Database:
                 )
                 """
             )
+            await self._ensure_user_columns(db)
+            await self._ensure_job_columns(db)
 
             # api_keys (пул ключей юзера; общий ключ сюда не пишется — он в .env)
             await db.execute(
@@ -148,9 +150,6 @@ class Database:
                 )
                 """
             )
-            # Миграции колонок — ПОСЛЕ создания всех таблиц.
-            await self._ensure_user_columns(db)
-            await self._ensure_job_columns(db)
             await db.commit()
 
     async def _ensure_user_columns(self, db: aiosqlite.Connection):

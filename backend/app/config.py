@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     IMAGE_MODEL: str = "openai/gpt-image-2"
     IMAGE_QUALITIES: Any = Field(default_factory=lambda: ["low", "medium", "high"])
     IMAGE_FORMATS: Any = Field(default_factory=lambda: ["png", "jpeg", "webp"])
-    IMAGE_ASPECTS: Any = Field(default_factory=lambda: ["1:1", "9:16", "16:9", "4:3", "3:4", "3:2", "2:3"])
+    IMAGE_ASPECTS: Any = Field(default_factory=lambda: ["1:1", "9:16", "16:9", "4:3", "3:4", "4:5", "3:2", "2:3"])
     IMAGE_SIZE_TIERS: Any = Field(default_factory=lambda: ["standard", "2k", "max"])
     DEFAULT_QUALITY: str = "medium"
     DEFAULT_FORMAT: str = "png"
@@ -209,6 +209,7 @@ class Settings(BaseSettings):
         "16:9": 16.0 / 9.0,    # альбом / экран
         "4:3": 4.0 / 3.0,
         "3:4": 3.0 / 4.0,
+        "4:5": 4.0 / 5.0,    # вертикаль (постерный 4:5)
         "3:2": 3.0 / 2.0,
         "2:3": 2.0 / 3.0,
     }

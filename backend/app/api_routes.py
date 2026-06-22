@@ -13,7 +13,6 @@ import hashlib
 import hmac
 import json
 import logging
-import re
 import time
 import uuid
 from pathlib import Path
@@ -165,14 +164,12 @@ async def read_reference_files(files: List[Any]) -> List[tuple]:
 
 
 def public_url(path: str) -> str:
-    """Всегда отдаёт ОТНОСИТЕЛЬНЫЙ URL (/media/...).
-    Фронт на том же домене (Railway) сам подставит домен через absoluteUrl().
-    Для sendPhoto файл читается с диска напрямую (см. _download)."""
     if not path:
         return ""
     if path.startswith(("http://", "https://")):
         return path
-    return path if path.startswith("/") else f"/{path}"
+    base = (settings.MEDIA_BASE_URL or settings.WEBAPP_URL).rstrip("/")
+    return f"{base}{path if path.startswith('/') else f'/{path}'}" if base else path
 
 
 def images_dir(job_id: str) -> Path:
@@ -322,20 +319,8 @@ async def api_generate(request: Request):
         raise HTTPException(status_code=400, detail=f"За один запуск до {settings.MAX_N_PER_CALL} картинок")
 
     # Референсы (порядок = @Image1, @Image2, ...). Читаем в память.
+    # Промпт отправляем как есть — без авто-дописывания инструкций модели.
     references = await read_reference_files(reference_files)
-
-    # Авто-усиление промпта для референсов: если загружены картинки, но в промпте
-    # нет @Image1 — добавляем инструкцию сохранить идентичность. gpt-image-2 слабо
-    # держит лицо, это хоть немного помогает сфокусировать модель на референсе.
-    if references and not re.search(r"@Image\d", prompt, flags=re.IGNORECASE):
-        prompt = (
-            f"Use @Image1 as the reference image. "
-            f"Preserve the exact identity, face features, and appearance of the person from @Image1. "
-            f"Same person, same face. {prompt}"
-        )
-    elif references:
-        # Если @Image уже есть — добавляем только акцент на идентичность.
-        prompt = f"Preserve exact identity and face features from the reference image. Same person, same face. {prompt}"
 
     est = estimate(size, quality, n)
     job_id = await db.create_job(
@@ -495,6 +480,7 @@ async def run_generation(
     # shared mutable state
     state = {"done": 0, "tokens": 0, "failed": 0}
     all_previews: List[str] = []
+    all_local_files: List[Path] = []   # пути на диске — для отправки в чат бота
     chunk_errors: List[str] = []
 
     async def run_chunk(start_index: int, chunk_size: int) -> str:
@@ -527,6 +513,7 @@ async def run_generation(
 
                     job_dir = images_dir(job_id)
                     chunk_previews: List[str] = []
+                    chunk_paths: List[Path] = []
                     for offset, b64 in enumerate(images_b64):
                         global_idx = start_index + offset + 1
                         content = base64.b64decode(b64)
@@ -536,6 +523,7 @@ async def run_generation(
                         relative = path.relative_to(Path(settings.MEDIA_DIR)).as_posix()
                         await db.add_image(job_id, relative, len(content))
                         chunk_previews.append(public_url(f"/media/{relative}"))
+                        chunk_paths.append(path)
 
                     tokens = int((result.usage or {}).get("total_tokens", 0))
                     cost_usd_chunk = float((result.usage or {}).get("cost_usd", 0) or 0)
@@ -544,6 +532,7 @@ async def run_generation(
                     state["tokens"] += tokens
                     state["cost_usd"] = state.get("cost_usd", 0.0) + cost_usd_chunk
                     all_previews.extend(chunk_previews)
+                    all_local_files.extend(chunk_paths)
 
                     pct = int(state["done"] / n * 100) if n else 100
                     await manager.send_progress(
@@ -657,7 +646,7 @@ async def run_generation(
     )
 
     if status in {"done", "partial"}:
-        await notify_job_done(telegram_id, job_id, prompt, size, quality, done_count, n, all_previews, total_tokens, output_format)
+        await notify_job_done(telegram_id, job_id, prompt, size, quality, done_count, n, all_local_files, total_tokens)
     elif status == "failed":
         await notify_job_failed(telegram_id, job_id, prompt, msg)
 
@@ -677,35 +666,31 @@ async def _telegram_post(endpoint: str, data: aiohttp.FormData) -> Dict[str, Any
             return payload
 
 
-async def _download(url: str) -> bytes:
-    # Если URL относительный (/media/...) — читаем файл с диска (быстрее и надёжнее).
-    if url.startswith("/media/"):
-        path = Path(settings.MEDIA_DIR) / url[len("/media/"):]
-        return await asyncio.to_thread(path.read_bytes)
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            return await resp.read()
+async def _read_image(path: Path) -> tuple:
+    """Читает файл картинки с диска (в отдельном потоке, чтобы не блокировать
+    event-loop). Возвращает (bytes, content_type, ext)."""
+    content = await asyncio.to_thread(path.read_bytes)
+    ext = (path.suffix.lstrip(".") or "png").lower()
+    content_type = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
+    return content, content_type, ext
 
 
-def _ext_for_format(fmt: str) -> str:
-    return fmt if fmt in {"png", "jpeg", "webp"} else "png"
+async def notify_job_done(telegram_id, job_id, prompt, size, quality, n_done, n_total, image_paths, usage_tokens):
+    """Отправляет готовые картинки в чат бота.
 
-
-def _ctype_for_format(fmt: str) -> str:
-    return {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}.get(fmt, "image/png")
-
-
-async def notify_job_done(telegram_id, job_id, prompt, size, quality, n_done, n_total, previews, usage_tokens, output_format="png"):
-    if not settings.BOT_TOKEN or not previews:
+    Читает файлы с диска напрямую — не зависит от MEDIA_BASE_URL/WEBAPP_URL и
+    HTTP-доступности медиа. Раньше качала по public_url, что ломалось, когда база
+    ссылок указывала не на бэкенд (например, на фронтенд). Порядок image_paths
+    сохраняется = @Image1, @Image2…
+    """
+    if not settings.BOT_TOKEN or not image_paths:
         return
-    ext = _ext_for_format(output_format)
-    ctype = _ctype_for_format(output_format)
     try:
-        if len(previews) == 1:
+        if len(image_paths) == 1:
+            content, ctype, ext = await _read_image(image_paths[0])
             data = aiohttp.FormData()
             data.add_field("chat_id", str(telegram_id))
-            data.add_field("photo", await _download(previews[0]), filename=f"image.{ext}", content_type=ctype)
+            data.add_field("photo", content, filename=f"image.{ext}", content_type=ctype)
             caption = f"🖼 Готово: {n_done}/{n_total}\n{size} · {quality}\nПромпт: {prompt[:200]}"
             data.add_field("caption", caption[:1024])
             await _telegram_post("sendPhoto", data)
@@ -713,9 +698,10 @@ async def notify_job_done(telegram_id, job_id, prompt, size, quality, n_done, n_
             data = aiohttp.FormData()
             data.add_field("chat_id", str(telegram_id))
             media = []
-            for i, url in enumerate(previews[:10]):
+            for i, p in enumerate(image_paths[:10]):
+                content, ctype, ext = await _read_image(p)
                 fname = f"image_{i}.{ext}"
-                data.add_field(fname, await _download(url), filename=fname, content_type=ctype)
+                data.add_field(fname, content, filename=fname, content_type=ctype)
                 media.append({"type": "photo", "media": f"attach://{fname}"})
             media[0]["caption"] = f"🖼 Готово: {n_done}/{n_total}\n{size} · {quality}\nТокенов: {usage_tokens}\nПромпт: {prompt[:200]}"
             data.add_field("media", json.dumps(media))
