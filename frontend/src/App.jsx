@@ -345,6 +345,10 @@ export default function App() {
               maxRefs={maxRefs}
               onAdd={handleAddReferences}
               onRemove={handleRemoveReference}
+              onDragClear={() => {
+                dragCounter.current = 0;
+                setDragOver(false);
+              }}
             />
             <div className="hint">
               Порядок = @Image1, @Image2… В промпте ссылайся: «@Image1 — главный герой, @Image2 — фон».
@@ -414,7 +418,7 @@ export default function App() {
   );
 }
 
-function ReferenceUploader({ references, maxRefs, onAdd, onRemove }) {
+function ReferenceUploader({ references, maxRefs, onAdd, onRemove, onDragClear }) {
   const inputRef = useRef(null);
   const [previews, setPreviews] = useState([]);
 
@@ -431,6 +435,7 @@ function ReferenceUploader({ references, maxRefs, onAdd, onRemove }) {
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       onAdd(e.dataTransfer.files);
     }
+    onDragClear?.();
   };
 
   const handleUploaderDragOver = (e) => {
@@ -438,8 +443,14 @@ function ReferenceUploader({ references, maxRefs, onAdd, onRemove }) {
     e.stopPropagation();
   };
 
+  const handleUploaderDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onDragClear?.();
+  };
+
   return (
-    <div className="ref-uploader" onDrop={handleUploaderDrop} onDragOver={handleUploaderDragOver}>
+    <div className="ref-uploader" onDrop={handleUploaderDrop} onDragOver={handleUploaderDragOver} onDragLeave={handleUploaderDragLeave}>
       {references.length === 0 && (
         <div className="ref-empty-zone">
           <span>📎 Перетащите фото сюда или нажмите «+»</span>
@@ -643,7 +654,7 @@ function TopBar({ balance, config }) {
       <div className="brand-copy">
         <h1>
           sami studio
-          <span className="version-badge">v6</span>
+          <span className="version-badge">v7</span>
         </h1>
         <div className="eyebrow">gpt-image-2</div>
       </div>
