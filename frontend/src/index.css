@@ -117,6 +117,35 @@ a {
   white-space: nowrap;
 }
 
+.version-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--teal);
+  color: #07110e;
+  font-size: 11px;
+  font-weight: 800;
+  vertical-align: middle;
+}
+
+.job-number {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.job-prompt {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
 .key-chip {
   min-width: 68px;
   border: 1px solid var(--line);
@@ -433,7 +462,7 @@ textarea:focus {
   background: #102522;
 }
 
-.app-shell.drag-over .references-panel {
+.app-shell.drag-over .ref-uploader {
   border-color: var(--teal);
   box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.28);
 }
@@ -1474,6 +1503,21 @@ input[type="range"] {
 
 /* ── Загрузка референсов ── */
 .ref-uploader { margin-top: 2px; }
+.ref-empty-zone {
+  display: grid;
+  place-items: center;
+  min-height: 120px;
+  border: 2px dashed var(--line);
+  border-radius: 14px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  margin-bottom: 10px;
+  padding: 12px;
+}
+.ref-empty-zone span { pointer-events: none; }
 .ref-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

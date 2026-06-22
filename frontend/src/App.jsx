@@ -127,10 +127,13 @@ export default function App() {
     }
     try {
       const res = await submitGeneration({ prompt, aspect, size_tier: sizeTier, quality, output_format: outputFormat, n, references });
-      setActiveJobs((prev) => ({
-        ...prev,
-        [res.job_id]: { job: res, progress: null, results: [], cancelling: false },
-      }));
+      setActiveJobs((prev) => {
+        const idx = Object.keys(prev).length + 1;
+        return {
+          ...prev,
+          [res.job_id]: { job: res, prompt, progress: null, results: [], cancelling: false, index: idx },
+        };
+      });
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -437,6 +440,11 @@ function ReferenceUploader({ references, maxRefs, onAdd, onRemove }) {
 
   return (
     <div className="ref-uploader" onDrop={handleUploaderDrop} onDragOver={handleUploaderDragOver}>
+      {references.length === 0 && (
+        <div className="ref-empty-zone">
+          <span>📎 Перетащите фото сюда или нажмите «+»</span>
+        </div>
+      )}
       <div className="ref-grid">
         {previews.map((url, i) => (
           <div key={i} className="ref-cell">
@@ -633,7 +641,10 @@ function TopBar({ balance, config }) {
     <div className="topbar">
       <div className="brand-mark avatar">🎨</div>
       <div className="brand-copy">
-        <h1>sami studio</h1>
+        <h1>
+          sami studio
+          <span className="version-badge">v6</span>
+        </h1>
         <div className="eyebrow">gpt-image-2</div>
       </div>
       <div className={"key-chip" + (hasKey ? " ready" : "")}>
@@ -771,18 +782,22 @@ function Viewer({ images, index, onClose, onNav }) {
 }
 
 function JobProgress({ jobId, data, onCancel }) {
-  const { job, progress, results, cancelling } = data;
+  const { job, prompt, progress, results, cancelling, index } = data;
   const total = job?.n || progress?.total_count || results.length || 1;
   const done = progress?.done_count || results.length;
   const stage = progress?.stage || "queued";
   const isFinal = ["done", "failed", "partial", "cancelled"].includes(stage);
   const progressPct = progress?.progress ?? (results.length / total * 100);
+  const shortPrompt = prompt ? prompt.slice(0, 35) + (prompt.length > 35 ? "…" : "") : "";
 
   return (
     <div className={"progress-block" + (isFinal ? "" : " is-active")}>
       <div className="progress-head">
-        <span>{STAGE_LABEL[stage] || stage}</span>
-        <span>{done}/{total}</span>
+        <span>
+          <span className="job-number">#{index || 1}</span>
+          {shortPrompt && <span className="job-prompt" title={prompt}>{shortPrompt}</span>}
+        </span>
+        <span>{STAGE_LABEL[stage] || stage} · {done}/{total}</span>
       </div>
       <div className="progress-bar">
         <div className="progress-fill" style={{ width: `${progressPct}%` }} />
